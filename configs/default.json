@@ -1,0 +1,15 @@
+{
+  "orb": {
+    "nfeatures": 1500,
+    "scaleFactor": 1.2,
+    "nlevels": 8,
+    "fastThreshold": 20
+  },
+  "matching": {
+    "ratio_threshold": 0.75,
+    "mutual_check": true
+  },
+  "visualization": {
+    "max_drawn_matches": 100
+  }
+}

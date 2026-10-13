@@ -1,0 +1,9 @@
+name: orb-slam-mono
+channels:
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+      - numpy>=1.23,<2
+      - opencv-python-headless>=4.8,<4.11

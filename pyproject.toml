@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orb-slam-mono"
+version = "0.1.0"
+description = "Inspectably built monocular ORB visual SLAM research project"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.23,<2", "opencv-python-headless>=4.8,<4.11"]
+
+[project.scripts]
+orb-slam-mono-demo = "orb_slam_mono.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
