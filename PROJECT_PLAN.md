@@ -23,11 +23,13 @@ Start development on a few hundred frames of a KITTI odometry training subsequen
 - Save separate feature views, a match visualization, and `stats.json` with feature counts, KNN pairs, ratio-passed and retained matches. Future geometry fields remain explicitly unknown.
 - Unit tests cover calibration, image loading, empty descriptors, clear matches, and mutual filtering; demo runs without a GUI. Synthetic smoke run produces at least 100 features per image and 30 retained matches. These counts verify software wiring only.
 
-### M2 — two-view geometry and monocular initialization (next; not implemented)
+### M2 — two-view geometry and monocular initialization (implemented; real KITTI validation pending)
 
 - Add inspectable normalized point handling, essential-matrix RANSAC, `recoverPose`, cheirality/parallax checks, and triangulation with reprojection/depth filtering.
 - On a controlled synthetic 3D scene with known calibration, recover rotation and translation **direction** within stated tolerances; do not claim translation magnitude. Reject pure rotation/low-parallax initialization and report the reason.
 - On a fixed short KITTI slice, log candidate matches, essential-matrix inliers, parallax, accepted 3D points, and rejected initialization attempts; produce an initialization visualization without ground-truth input.
+
+M2 synthetic acceptance: 450 visible noncoplanar landmarks, 0.35 px Gaussian noise, 0.8 scene-unit baseline, and 3° nominal rotation yield 1.25° rotation error, 1.84° translation-direction error, 427 essential/pose inliers and accepted points, and 4.04° median parallax (seed 7). The rendered-image ORB path also initializes. Pure rotation and 0.005 scene-unit baseline tests reject. Twenty-seven tests pass, including the original ten. The KITTI code path is exercised by a rendered-image fixture; real KITTI acceptance remains pending because no actual data is installed.
 
 ### M3 — map-based tracking and explicit state (planned)
 
@@ -54,8 +56,8 @@ Start development on a few hundred frames of a KITTI odometry training subsequen
 ### Optional final visualization/export (outside core SLAM)
 
 - Export sparse 3D landmarks to PLY and estimated camera poses/trajectory to documented JSON with coordinate frame, transform direction, units, and unknown monocular scale stated explicitly.
-- An optional Blender Python script may import these exports to show camera frustums, sparse points, trajectory lines, and rendered views. Keep Blender outside runtime dependencies and SLAM mathematics. Default to CPU rendering; consider AMD HIP only after identifying the precise GPU and confirming support.
+- An optional Blender Python script may import these exports to show camera frustums, sparse points, trajectory lines, animation, and rendered views. Keep Blender outside runtime dependencies and SLAM mathematics. On the user-confirmed RTX 3050 Ti, prefer NVIDIA OptiX only after driver/Blender compatibility checks; keep CPU rendering as a fallback, especially when a scene exceeds 4 GiB VRAM. GPU acceleration is optional and never required for core SLAM.
 
 ## Working rule
 
-Only implement the currently authorized milestone. Update `STATUS.md` after each session with completed work, commands, test results, issues, and the next prompt. Do not advance past M1 without an explicit request.
+Only implement the currently authorized milestone. Update `STATUS.md` after each session with completed work, commands, test results, issues, and the next prompt. Do not advance past M2 without an explicit request.
