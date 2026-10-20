@@ -31,6 +31,8 @@ Start development on a few hundred frames of a KITTI odometry training subsequen
 
 M2 synthetic acceptance: 450 visible noncoplanar landmarks, 0.35 px Gaussian noise, 0.8 scene-unit baseline, and 3° nominal rotation yield 1.25° rotation error, 1.84° translation-direction error, 427 essential/pose inliers and accepted points, and 4.04° median parallax (seed 7). The rendered-image ORB path also initializes. Pure rotation and 0.005 scene-unit baseline tests reject. Twenty-seven tests pass, including the original ten. The KITTI code path is exercised by a rendered-image fixture; real KITTI acceptance remains pending because no actual data is installed.
 
+**M2 audit refinement:** A rejected attempt may retain provisional diagnostic counts but must expose zero usable map points and no public camera-2 pose. Exports must label rejection and replace stale outputs from earlier accepted runs. Added cheirality-consensus and rotation-only residual quality gates after a 0.15-baseline case was falsely accepted with reversed translation direction. A fixed 5-seed × 8-condition synthetic study retains 5/5 acceptance for each well-conditioned/noisy/outlier group, reduces weak-baseline acceptance from 4/5 to 2/5, and rejects all five very weak and pure-rotation cases. Full CSV/JSON results are generated but ignored by Git. The offline 3D report now separates scale-only fit from a true-pose triangulation reference. Actual KITTI validation remains an explicit M2 acceptance gap; proceed to M3 only after review of these corrections and the real-data limitation.
+
 ### M3 — map-based tracking and explicit state (planned)
 
 - Introduce `Frame`, `Keyframe`, `MapPoint`, and `Map` when their invariants and ownership become necessary. Record 2D observations and map-point identity explicitly.
@@ -60,4 +62,4 @@ M2 synthetic acceptance: 450 visible noncoplanar landmarks, 0.35 px Gaussian noi
 
 ## Working rule
 
-Only implement the currently authorized milestone. Update `STATUS.md` after each session with completed work, commands, test results, issues, and the next prompt. Do not advance past M2 without an explicit request.
+Only implement the currently authorized milestone. Update `STATUS.md` after each milestone or audit with completed work, commands, test results, issues, and the next prompt. Use milestone-based headings in all project Markdown; omit development calendar dates and timestamps while preserving publication years, version numbers, dataset identifiers, and numerical results. Any future commit requires explicit approval and a newly supplied author date, committer date, and timezone; do not reuse a previously authorized date. Do not advance past M2 without an explicit request.

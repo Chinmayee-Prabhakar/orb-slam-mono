@@ -25,7 +25,9 @@ class GeometryConfig:
     min_essential_inliers: int = 40
     min_essential_inlier_ratio: float = 0.4
     min_pose_inliers: int = 30
+    min_pose_inlier_fraction: float = 0.9
     min_triangulated_points: int = 25
+    min_rotation_only_residual_px: float = 1.5
     min_point_parallax_deg: float = 0.5
     min_median_parallax_deg: float = 1.0
     min_homography_coverage: float = 0.9
@@ -36,18 +38,22 @@ class GeometryConfig:
 
     def __post_init__(self) -> None:
         thresholds = [self.ransac_confidence, self.ransac_threshold_px,
-                      self.min_essential_inlier_ratio, self.min_point_parallax_deg,
+                      self.min_essential_inlier_ratio, self.min_pose_inlier_fraction,
+                      self.min_rotation_only_residual_px, self.min_point_parallax_deg,
                       self.min_median_parallax_deg, self.min_homography_coverage,
                       self.min_homography_advantage, self.max_dominant_homography_parallax_deg,
                       self.max_reprojection_error_px, self.max_depth_in_baselines]
         if not np.all(np.isfinite(thresholds)):
             raise ValueError("Geometry thresholds must be finite")
-        if not 0 < self.ransac_confidence < 1 or not 0 < self.min_essential_inlier_ratio <= 1:
+        if (not 0 < self.ransac_confidence < 1
+                or not 0 < self.min_essential_inlier_ratio <= 1
+                or not 0 < self.min_pose_inlier_fraction <= 1):
             raise ValueError("Confidence and inlier ratio must be in (0, 1]")
         if min(self.min_correspondences, self.min_essential_inliers, self.min_pose_inliers,
                self.min_triangulated_points) < 1:
             raise ValueError("Minimum correspondence and point counts must be positive")
-        if min(self.ransac_threshold_px, self.min_point_parallax_deg,
+        if min(self.ransac_threshold_px, self.min_rotation_only_residual_px,
+               self.min_point_parallax_deg,
                self.min_median_parallax_deg, self.max_reprojection_error_px,
                self.max_depth_in_baselines, self.max_dominant_homography_parallax_deg,
                self.min_homography_advantage) <= 0 or not 0 < self.min_homography_coverage <= 1:
@@ -72,6 +78,8 @@ class InitializationResult:
     failure_reason: Optional[str] = None
     R_21: Optional[np.ndarray] = None
     t_21: Optional[np.ndarray] = None
+    debug_provisional_R_21: Optional[np.ndarray] = None
+    debug_provisional_t_21: Optional[np.ndarray] = None
     essential_mask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     pose_mask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
     accepted_mask: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
@@ -89,6 +97,11 @@ class InitializationResult:
             "t_21_unit": None if self.t_21 is None else self.t_21.tolist(),
             "C2_in_camera1": None if self.R_21 is None or self.t_21 is None
             else (-self.R_21.T @ self.t_21).tolist(),
+            "valid_for_mapping": self.status == "accepted",
+            "debug_provisional_pose_invalid_for_mapping": None if self.status == "accepted" else {
+                "R_21": None if self.debug_provisional_R_21 is None else self.debug_provisional_R_21.tolist(),
+                "t_21_unit": None if self.debug_provisional_t_21 is None else self.debug_provisional_t_21.tolist(),
+            },
             "diagnostics": self.diagnostics,
             "timing_ms": self.timing_ms,
             "essential_inlier_indices": np.flatnonzero(self.essential_mask).tolist(),
@@ -134,6 +147,26 @@ def parallax_degrees(points1_px: np.ndarray, points2_px: np.ndarray,
     rays2_in_first = (R_21.T @ _bearings(points2_px, camera).T).T
     cosine = np.clip(np.sum(rays1 * rays2_in_first, axis=1), -1.0, 1.0)
     return np.degrees(np.arccos(cosine))
+
+
+def rotation_only_median_residual_px(points1_px: np.ndarray, points2_px: np.ndarray,
+                                     camera: CalibratedCamera) -> float:
+    """Median pixel residual after fitting one proper rotation to bearing pairs.
+
+    A near-zero residual means translation is not discernible at this image
+    precision. This fit is a quality diagnostic, never an estimated SLAM pose.
+    """
+    first = _bearings(points1_px, camera)
+    second = _bearings(points2_px, camera)
+    u, _, vt = np.linalg.svd(second.T @ first)
+    rotation = u @ np.diag([1.0, 1.0, np.linalg.det(u @ vt)]) @ vt
+    rotated = (rotation @ first.T).T
+    projected = (camera.matrix @ rotated.T).T
+    valid = np.isfinite(projected).all(axis=1) & (projected[:, 2] > 1e-12)
+    if not valid.any():
+        return float("nan")
+    pixels = projected[valid, :2] / projected[valid, 2:3]
+    return float(np.median(np.linalg.norm(pixels - points2_px[valid], axis=1)))
 
 
 def filter_triangulated_points(
@@ -220,11 +253,13 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
     counts: Dict[str, Any] = {
         "input_correspondences": 0, "essential_inliers": None,
         "essential_inlier_ratio": None, "pose_inliers": None,
+        "pose_inlier_fraction": None, "rotation_only_median_residual_px": None,
         "homography_inliers": None, "homography_dominant": None,
         "triangulation_candidates": None, "homogeneous_valid": None,
         "positive_depth": None, "depth_range": None, "parallax_pass": None,
         "reprojection_pass": None, "accepted_points": None,
-        "median_candidate_parallax_deg": None, "median_accepted_parallax_deg": None,
+        "median_candidate_parallax_deg": None, "candidate_parallax_p10_deg": None,
+        "candidate_parallax_p90_deg": None, "median_accepted_parallax_deg": None,
         "median_reprojection_error_first_px": None,
         "median_reprojection_error_second_px": None,
     }
@@ -233,6 +268,16 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
     def finish(reason: Optional[str]) -> InitializationResult:
         result.failure_reason = reason
         result.status = "accepted" if reason is None else "rejected"
+        if reason is not None:
+            # Diagnostic masks/counts remain, but public pose and map fields
+            # cannot be consumed as an accepted initialization.
+            result.debug_provisional_R_21 = result.R_21
+            result.debug_provisional_t_21 = result.t_21
+            result.R_21 = None
+            result.t_21 = None
+            result.points_xyz = np.empty((0, 3), dtype=np.float64)
+            result.accepted_mask = np.zeros_like(result.accepted_mask)
+        counts["usable_map_points"] = len(result.points_xyz)
         result.timing_ms["total"] = round((perf_counter() - started) * 1000, 3)
         return result
 
@@ -275,6 +320,11 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
     if (essential_count < cfg.min_essential_inliers
             or essential_count / n < cfg.min_essential_inlier_ratio):
         return finish("insufficient_essential_inliers")
+    rotation_only_error = rotation_only_median_residual_px(
+        first[result.essential_mask], second[result.essential_mask], camera)
+    counts["rotation_only_median_residual_px"] = rotation_only_error
+    if not np.isfinite(rotation_only_error):
+        return finish("invalid_geometry")
 
     # A homography is only a degeneracy diagnostic. Planar translation can also
     # produce a strong homography, so it rejects only alongside low parallax.
@@ -314,8 +364,13 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
         return finish("pose_recovery_failed")
     pose_count, result.R_21, result.t_21, result.pose_mask = best
     counts["pose_inliers"] = pose_count
+    counts["pose_inlier_fraction"] = pose_count / essential_count
     if pose_count < cfg.min_pose_inliers:
         return finish("insufficient_pose_inliers")
+    if counts["pose_inlier_fraction"] < cfg.min_pose_inlier_fraction:
+        return finish("low_cheirality_fraction")
+    if rotation_only_error < cfg.min_rotation_only_residual_px:
+        return finish("rotation_only_explains_matches")
 
     source_indices = np.flatnonzero(result.pose_mask)
     counts["triangulation_candidates"] = len(source_indices)
@@ -324,6 +379,8 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
     if not np.all(np.isfinite(candidate_angles)):
         return finish("invalid_geometry")
     counts["median_candidate_parallax_deg"] = float(np.median(candidate_angles))
+    counts["candidate_parallax_p10_deg"] = float(np.percentile(candidate_angles, 10))
+    counts["candidate_parallax_p90_deg"] = float(np.percentile(candidate_angles, 90))
     if (counts["homography_dominant"] and counts["median_candidate_parallax_deg"]
             < cfg.max_dominant_homography_parallax_deg):
         return finish("rotation_or_planar_degeneracy")
@@ -351,6 +408,8 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
         counts["median_accepted_parallax_deg"] = float(np.median(filtered.parallax_deg))
         counts["median_reprojection_error_first_px"] = float(np.median(filtered.reprojection_error_first_px))
         counts["median_reprojection_error_second_px"] = float(np.median(filtered.reprojection_error_second_px))
+    if filtered.counts["triangulation_candidates"] < cfg.min_triangulated_points:
+        return finish("insufficient_triangulated_points")
     if filtered.counts["positive_depth"] < cfg.min_triangulated_points:
         return finish("insufficient_positive_depth")
     if filtered.counts["depth_range"] < cfg.min_triangulated_points:

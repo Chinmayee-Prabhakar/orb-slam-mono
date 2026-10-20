@@ -28,6 +28,7 @@ $env:PYTHONPATH = (Resolve-Path .\src).Path
 python -m orb_slam_mono.demo --output-dir artifacts/demo
 python -m orb_slam_mono.geometry_demo --mode synthetic --output-dir artifacts/geometry-synthetic
 python -m orb_slam_mono.geometry_demo --mode synthetic-images --output-dir artifacts/geometry-synthetic-images
+python -m orb_slam_mono.robustness_study --label after --output-dir artifacts/m2-audit-after
 python -m unittest discover -s tests -v
 ```
 
@@ -41,6 +42,8 @@ python -m venv .venv
 Use `.\.venv\Scripts\python` in place of `python` after installation. A Conda specification is also provided in `environment.yml`. The original M1 demo still writes `matches.png`, two feature images, and `stats.json`. M2 writes `essential_correspondences.png` (green RANSAC inliers, red others), `pose_correspondences.png` (green pose inliers), `triangulated_correspondences.png` (green accepted points), `sparse_map.png` (oblique view), `landmarks.ply`, `poses.json`, and `stats.json`. `artifacts/` is ignored by Git.
 
 `--mode synthetic` gives the geometry estimator noisy projected 2D correspondences and calibration, then evaluates against held-out truth. `--mode synthetic-images` renders the 3D scene as grayscale images and uses actual ORB extraction and descriptor matching before geometry. The old M1 shifted-image fallback remains a matching demo; it is not used as a physical motion benchmark.
+
+The audit study runs five fixed seeds over eight noise/outlier/baseline conditions and writes `robustness.csv`, `robustness.json`, and `summary.txt`. Both accepted and rejected attempts are included. Synthetic truth is read only after each initialization for evaluation.
 
 ## KITTI data
 
@@ -68,5 +71,9 @@ The loader reads `P0` and `image_0` only, plus optional timestamps. It never rea
 The original M1 `stats.json` fields and their meanings are unchanged. In M2, `retained_matches` remains a descriptor-filter count; `essential_inliers` counts RANSAC inliers; `pose_inliers` counts those retained by cheirality-based pose recovery; `accepted_points` counts triangulations surviving numerical, positive-depth, parallax, and reprojection gates. A rejected initialization has `initialization_status: rejected` and a `failure_reason`; stages not reached use `null` counts. `synthetic` mode has `null` ORB fields because it tests geometry on point correspondences directly.
 
 `T_cw` maps world to camera: `X_c = R_cw X_w + t_cw`. Camera 1 defines the world origin. `R_21` and `t_21_unit` are camera 2 relative to camera 1; `C2 = -R_21.T @ t_21_unit`. `landmarks.ply` uses camera-1 world coordinates, and `poses.json` records both world-to-camera matrices. One translation baseline is defined as one arbitrary unit; PLY/JSON output is **not metric**. Synthetic ground truth is used only after estimation to score rotation, direction, and an explicitly offline aligned 3D error.
+
+Initialization also requires pose cheirality support from at least 90% of essential inliers and a median rotation-only fit residual above 1.5 px. These conservative checks guard against a weak-baseline reversed translation and false pure-rotation reconstruction. On rejection, `R_21`, `t_21_unit`, and camera-2 pose are `null`, the public map is empty, and PLY contains zero vertices. `diagnostics.accepted_points` remains the **provisional triangulation-filter survivor count**; `diagnostics.usable_map_points` is zero. Rejected PNGs are labeled diagnostic only. A rerun replaces the demo's own artifact files so an earlier successful map does not linger.
+
+The offline 3D metric is an **origin-fixed, scale-only** fit, not Umeyama Sim(3). The report includes its fitted scale, median/p90 3D errors and depth distributions, plus a separate true-pose triangulation reference using the same noisy synthetic observations. None of those truth-based quantities affects initialization or the exported map. The rendered-image ORB mode has no known match-to-landmark identity, so its 3D truth-alignment fields are `null`.
 
 See `PROJECT_PLAN.md`, `NOTES.md`, `REFERENCES.md`, and `STATUS.md` for scope, decisions, sources, and the next task.

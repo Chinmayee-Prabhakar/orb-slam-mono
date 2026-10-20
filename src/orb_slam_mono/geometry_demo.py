@@ -15,7 +15,8 @@ from .datasets import KittiGraySequence
 from .features import OrbExtractor
 from .geometry import GeometryConfig, InitializationResult, initialize_two_view
 from .matching import DescriptorMatcher
-from .synthetic3d import SyntheticScene, generate_scene, render_projected_landmarks
+from .offline_evaluation import evaluate_synthetic
+from .synthetic3d import generate_scene, render_projected_landmarks
 
 DEFAULT_CONFIG = Path(__file__).absolute().parents[2] / "configs" / "default.json"
 
@@ -24,34 +25,9 @@ def _camera_dict(camera: Any) -> Dict[str, Any]:
     return {key: getattr(camera, key) for key in ("width", "height", "fx", "fy", "cx", "cy")}
 
 
-def _angle_degrees(first: np.ndarray, second: np.ndarray) -> float:
-    cosine = np.clip(float(np.dot(first, second) / (np.linalg.norm(first) * np.linalg.norm(second))), -1, 1)
-    return float(np.degrees(np.arccos(cosine)))
-
-
-def _offline_synthetic_evaluation(result: InitializationResult, scene: SyntheticScene) -> Dict[str, Any]:
-    """Truth is used only after estimation for this synthetic benchmark."""
-    if result.R_21 is None or result.t_21 is None:
-        return {"rotation_error_deg": None, "translation_direction_error_deg": None,
-                "median_3d_error_after_offline_scale_alignment": None}
-    rotation_delta = result.R_21 @ scene.R_21_truth.T
-    rotation_error = float(np.degrees(np.arccos(np.clip((np.trace(rotation_delta) - 1) / 2, -1, 1))))
-    translation_error = _angle_degrees(result.t_21, scene.t_21_metric_truth)
-    aligned_error = None
-    if len(result.points_xyz) and len(result.accepted_mask) == len(scene.points_world):
-        truth = scene.points_world[result.accepted_mask]
-        estimate = result.points_xyz
-        # Single scalar is computed after estimation for evaluation only.
-        scale = float(np.sum(estimate * truth) / np.sum(estimate * estimate))
-        aligned_error = float(np.median(np.linalg.norm(scale * estimate - truth, axis=1)))
-    return {"rotation_error_deg": rotation_error,
-            "translation_direction_error_deg": translation_error,
-            "median_3d_error_after_offline_scale_alignment": aligned_error}
-
-
 def _draw_correspondences(first: np.ndarray, second: np.ndarray, points1: np.ndarray,
                           points2: np.ndarray, mask: np.ndarray, destination: Path,
-                          max_drawn: int) -> None:
+                          max_drawn: int, result: InitializationResult) -> None:
     left = cv2.cvtColor(first, cv2.COLOR_GRAY2BGR)
     right = cv2.cvtColor(second, cv2.COLOR_GRAY2BGR)
     canvas = np.concatenate((left, right), axis=1)
@@ -65,15 +41,21 @@ def _draw_correspondences(first: np.ndarray, second: np.ndarray, points1: np.nda
             cv2.line(canvas, a, b, color, 1, cv2.LINE_AA)
             cv2.circle(canvas, a, 3, color, 1, cv2.LINE_AA)
             cv2.circle(canvas, b, 3, color, 1, cv2.LINE_AA)
+    if result.status == "rejected":
+        cv2.putText(canvas, f"REJECTED - diagnostic only: {result.failure_reason}",
+                    (15, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2, cv2.LINE_AA)
     if not cv2.imwrite(str(destination), canvas):
         raise OSError(f"Could not save {destination}")
 
 
-def _write_ply(path: Path, points: np.ndarray) -> None:
+def _write_ply(path: Path, result: InitializationResult) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as output:
         output.write("ply\nformat ascii 1.0\ncomment camera-1 world frame; arbitrary unit baseline\n")
-        output.write(f"element vertex {len(points)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n")
-        for xyz in points:
+        output.write(f"comment initialization_status {result.status}\n")
+        if result.failure_reason:
+            output.write(f"comment failure_reason {result.failure_reason}\n")
+        output.write(f"element vertex {len(result.points_xyz)}\nproperty float x\nproperty float y\nproperty float z\nend_header\n")
+        for xyz in result.points_xyz:
             output.write(f"{xyz[0]:.8g} {xyz[1]:.8g} {xyz[2]:.8g}\n")
 
 
@@ -84,7 +66,9 @@ def _write_poses(path: Path, result: InitializationResult) -> None:
         second = identity.copy()
         second[:3, :3] = result.R_21
         second[:3, 3] = result.t_21
-    data = {"coordinate_frame": "camera 1 optical frame: +x right, +y down, +z forward",
+    data = {"initialization_status": result.status, "failure_reason": result.failure_reason,
+            "valid_for_mapping": result.status == "accepted",
+            "coordinate_frame": "camera 1 optical frame: +x right, +y down, +z forward",
             "transform_convention": "T_cw maps world to camera; X_c = R_cw X_w + t_cw",
             "scale": "arbitrary; ||t_21|| = 1; never metric",
             "poses_T_cw": [{"camera": 1, "matrix": identity.tolist()},
@@ -96,13 +80,19 @@ def _write_poses(path: Path, result: InitializationResult) -> None:
 
 def _draw_map(path: Path, result: InitializationResult, camera: Any) -> None:
     canvas = np.full((800, 1100, 3), 250, np.uint8)
-    cv2.putText(canvas, "Sparse two-view map - arbitrary monocular scale", (30, 42),
+    title = ("Sparse two-view map - arbitrary monocular scale" if result.status == "accepted"
+             else "Initialization rejected - no usable map")
+    cv2.putText(canvas, title, (30, 42),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.9, (35, 35, 35), 2, cv2.LINE_AA)
-    cv2.putText(canvas, "Oblique view: x right, z diagonal, y vertical", (30, 76),
+    subtitle = ("Oblique view: x right, z diagonal, y vertical" if result.status == "accepted"
+                else "Diagnostic attempt; no 3D reconstruction exported")
+    cv2.putText(canvas, subtitle, (30, 76),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (70, 70, 70), 1, cv2.LINE_AA)
     if result.R_21 is None or result.t_21 is None:
-        cv2.putText(canvas, "No recovered pose", (30, 120), cv2.FONT_HERSHEY_SIMPLEX,
+        cv2.putText(canvas, f"REJECTED: {result.failure_reason}", (30, 120), cv2.FONT_HERSHEY_SIMPLEX,
                     0.8, (0, 0, 160), 2, cv2.LINE_AA)
+        cv2.putText(canvas, "No usable camera-2 pose or landmarks", (30, 155),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 160), 1, cv2.LINE_AA)
     else:
         center2 = -result.R_21.T @ result.t_21
         corners = np.array([[0, 0, 1], [-camera.cx / camera.fx, -camera.cy / camera.fy, 1],
@@ -188,13 +178,13 @@ def run_geometry_demo(mode: str, output_dir: Path, config: Dict[str, Any],
     output_dir.mkdir(parents=True, exist_ok=True)
     max_drawn = int(config["visualization"]["max_drawn_matches"])
     _draw_correspondences(first, second, points1, points2, geometry.essential_mask,
-                          output_dir / "essential_correspondences.png", max_drawn)
+                          output_dir / "essential_correspondences.png", max_drawn, geometry)
     _draw_correspondences(first, second, points1, points2, geometry.pose_mask,
-                          output_dir / "pose_correspondences.png", max_drawn)
+                          output_dir / "pose_correspondences.png", max_drawn, geometry)
     _draw_correspondences(first, second, points1, points2, geometry.accepted_mask,
-                          output_dir / "triangulated_correspondences.png", max_drawn)
+                          output_dir / "triangulated_correspondences.png", max_drawn, geometry)
     _draw_map(output_dir / "sparse_map.png", geometry, camera)
-    _write_ply(output_dir / "landmarks.ply", geometry.points_xyz)
+    _write_ply(output_dir / "landmarks.ply", geometry)
     _write_poses(output_dir / "poses.json", geometry)
     stage_ms.update(geometry.timing_ms)
     stage_ms["end_to_end_total"] = round((perf_counter() - started) * 1000, 3)
@@ -207,7 +197,7 @@ def run_geometry_demo(mode: str, output_dir: Path, config: Dict[str, Any],
               {"seed": scene.seed, "noise_px": scene.noise_px, "visible_landmarks": len(scene.points_world),
                "translation_baseline_metric_truth_for_evaluation_only": scene.baseline},
               "offline_synthetic_evaluation": None if scene is None else
-              _offline_synthetic_evaluation(geometry, scene),
+              evaluate_synthetic(geometry, scene, point_identity_known=(mode == "synthetic")),
               "outputs": ["essential_correspondences.png", "pose_correspondences.png",
                           "triangulated_correspondences.png",
                           "sparse_map.png", "landmarks.ply", "poses.json", "stats.json"]}

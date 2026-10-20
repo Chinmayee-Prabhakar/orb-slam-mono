@@ -3,6 +3,7 @@
 import json
 import contextlib
 import io
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ import numpy as np
 from orb_slam_mono.geometry import (GeometryConfig, _essential_candidates,
                                     filter_triangulated_points, initialize_two_view)
 from orb_slam_mono.geometry_demo import DEFAULT_CONFIG, main, run_geometry_demo
+from orb_slam_mono.offline_evaluation import evaluate_synthetic
 from orb_slam_mono.synthetic3d import generate_scene, render_projected_landmarks
 
 
@@ -53,6 +55,7 @@ class GeometryTests(unittest.TestCase):
         self.assertLess(float(np.max(err2)), 3.0)
         center2 = -result.R_21.T @ result.t_21
         np.testing.assert_allclose(result.R_21 @ center2 + result.t_21, np.zeros(3), atol=1e-12)
+        self.assertEqual(len(result.points_xyz), int(result.accepted_mask.sum()))
 
     def test_triangulation_with_known_pose_in_unit_baseline_frame(self):
         scene = self.scene
@@ -86,6 +89,77 @@ class GeometryTests(unittest.TestCase):
         self.assertNotIn(103, filtered.accepted_source_indices)
         self.assertEqual(len(filtered.accepted_local_mask), 8)
         self.assertTrue(np.all(np.isin(filtered.accepted_source_indices, source)))
+
+    def test_each_triangulation_filter_stage_and_source_identity(self):
+        scene = self.scene
+        unit_t = scene.t_21_metric_truth / np.linalg.norm(scene.t_21_metric_truth)
+        points1, points2 = scene.points1_px[:8].copy(), scene.points2_px[:8].copy()
+        p1 = scene.camera.matrix @ np.hstack((np.eye(3), np.zeros((3, 1))))
+        p2 = scene.camera.matrix @ np.column_stack((scene.R_21_truth, unit_t))
+        h = cv2.triangulatePoints(p1, p2, points1.T, points2.T)
+        h[:, 0] = [np.nan, 0, 1, 1]  # invalid homogeneous point
+        h[:, 1] = [0, 0, -5, 1]      # negative depth in camera 1
+        h[:, 2] = [100, 0, 1, 1]     # positive first depth, negative second depth
+        h[:, 3] = [0, 0, 500, 1]     # beyond maximum depth in baseline units
+        ray1 = np.array([(points1[4, 0] - scene.camera.cx) / scene.camera.fx,
+                         (points1[4, 1] - scene.camera.cy) / scene.camera.fy, 1.0])
+        rotated = scene.R_21_truth @ ray1
+        points2[4] = (scene.camera.matrix @ rotated)[:2] / rotated[2]  # zero parallax
+        points1[5] += [35, 20]       # first-view reprojection error
+        points2[6] += [35, 20]       # second-view reprojection error
+        source = np.arange(100, 108)
+        filtered = filter_triangulated_points(h, points1, points2, scene.camera,
+                                              scene.R_21_truth, unit_t, source, GeometryConfig())
+        counts = filtered.counts
+        stages = [counts[key] for key in ("triangulation_candidates", "homogeneous_valid",
+                                           "positive_depth", "depth_range", "parallax_pass",
+                                           "reprojection_pass", "accepted_points")]
+        self.assertEqual(stages, [8, 7, 5, 4, 3, 1, 1])
+        self.assertTrue(all(left >= right for left, right in zip(stages, stages[1:])))
+        self.assertEqual(filtered.accepted_source_indices.tolist(), [107])
+        self.assertEqual(np.flatnonzero(filtered.accepted_local_mask).tolist(), [7])
+        self.assertLess((scene.R_21_truth @ np.array([100., 0., 1.]) + unit_t)[2], 0)
+
+    def test_rejected_provisional_points_are_not_map(self):
+        scene = self.scene
+        result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera,
+                                     GeometryConfig(min_triangulated_points=430))
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.failure_reason, "insufficient_triangulated_points")
+        self.assertEqual(result.diagnostics["accepted_points"], 427)
+        self.assertEqual(result.diagnostics["usable_map_points"], 0)
+        self.assertEqual(len(result.points_xyz), 0)
+        self.assertEqual(int(result.accepted_mask.sum()), 0)
+        self.assertIsNone(result.R_21)
+        self.assertIsNone(result.t_21)
+        self.assertIsNotNone(result.debug_provisional_R_21)
+        self.assertFalse(result.as_dict()["valid_for_mapping"])
+
+    def test_rejected_rerun_overwrites_only_own_artifacts(self):
+        config = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            good = run_geometry_demo("synthetic", folder, config)
+            self.assertEqual(good["initialization_status"], "accepted")
+            self.assertIn("element vertex 427", (folder / "landmarks.ply").read_text())
+            prior_map_png = (folder / "sparse_map.png").read_bytes()
+            unrelated = folder / "keep_me.txt"
+            unrelated.write_text("user data", encoding="utf-8")
+            config["geometry"]["min_triangulated_points"] = 430
+            bad = run_geometry_demo("synthetic", folder, config)
+            self.assertEqual(bad["initialization_status"], "rejected")
+            self.assertEqual(bad["diagnostics"]["accepted_points"], 427)
+            self.assertEqual(bad["diagnostics"]["usable_map_points"], 0)
+            self.assertFalse(bad["valid_for_mapping"])
+            self.assertIsNone(bad["R_21"])
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "user data")
+            ply = (folder / "landmarks.ply").read_text(encoding="utf-8")
+            self.assertIn("element vertex 0", ply)
+            self.assertIn("initialization_status rejected", ply)
+            poses = json.loads((folder / "poses.json").read_text(encoding="utf-8"))
+            self.assertFalse(poses["valid_for_mapping"])
+            self.assertIsNone(poses["poses_T_cw"][1]["matrix"])
+            self.assertNotEqual((folder / "sparse_map.png").read_bytes(), prior_map_png)
 
     def test_malformed_homogeneous_output_is_structured(self):
         scene = self.scene
@@ -124,13 +198,55 @@ class GeometryTests(unittest.TestCase):
             result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera)
             self.assertEqual(result.status, "rejected")
             self.assertIn(result.failure_reason, ("rotation_or_planar_degeneracy", "low_parallax",
-                                                  "insufficient_pose_inliers", "insufficient_essential_inliers"))
+                                                  "insufficient_pose_inliers", "insufficient_essential_inliers",
+                                                  "low_cheirality_fraction", "rotation_only_explains_matches"))
 
     def test_excess_outliers_reject(self):
         scene = generate_scene(outlier_fraction=0.85)
         result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera)
         self.assertEqual(result.status, "rejected")
         self.assertEqual(result.failure_reason, "insufficient_essential_inliers")
+
+    def test_reviewed_weak_baseline_is_not_false_accepted(self):
+        scene = generate_scene(seed=7, baseline=0.15, noise_px=0.35)
+        result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera)
+        self.assertEqual(result.failure_reason, "low_cheirality_fraction")
+        self.assertLess(result.diagnostics["pose_inlier_fraction"], 0.9)
+        self.assertEqual(len(result.points_xyz), 0)
+        self.assertIsNone(result.t_21)
+
+    def test_rotation_only_diagnostic_rejects_spurious_pure_rotation(self):
+        scene = generate_scene(seed=23, baseline=0.0, noise_px=0.0)
+        result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera)
+        self.assertEqual(result.failure_reason, "rotation_only_explains_matches")
+        self.assertLess(result.diagnostics["rotation_only_median_residual_px"], 1.5)
+        self.assertEqual(result.diagnostics["usable_map_points"], 0)
+
+    def test_scale_only_offline_evaluation_is_not_sim3(self):
+        scene, result = self.scene, self.result
+        estimate_before = result.points_xyz.copy()
+        evaluation = evaluate_synthetic(result, scene)
+        alignment = evaluation["scale_only_alignment"]
+        self.assertIn("not Umeyama Sim(3)", alignment["definition"])
+        truth = scene.points_world[result.accepted_mask]
+        estimate = result.points_xyz
+        expected_scale = float(np.sum(estimate * truth) / np.sum(estimate * estimate))
+        self.assertAlmostEqual(alignment["fitted_scale_scene_units_per_estimated_unit"], expected_scale)
+        self.assertAlmostEqual(alignment["median_3d_error_scene_units"],
+                               evaluation["median_3d_error_after_offline_scale_alignment"])
+        self.assertLess(evaluation["true_pose_triangulation_reference"]["median_3d_error"], 0.1)
+        self.assertGreater(alignment["median_3d_error_scene_units"],
+                           evaluation["true_pose_triangulation_reference"]["median_3d_error"])
+        np.testing.assert_array_equal(result.points_xyz, estimate_before)
+        self.assertEqual(list(inspect.signature(initialize_two_view).parameters),
+                         ["points1_px", "points2_px", "camera", "config"])
+
+    def test_fixed_nominal_seeds_stay_accepted(self):
+        for seed in (7, 11, 19, 23, 31):
+            scene = generate_scene(seed=seed, baseline=0.8, noise_px=0.35)
+            result = initialize_two_view(scene.points1_px, scene.points2_px, scene.camera)
+            self.assertEqual(result.status, "accepted", f"seed {seed}: {result.failure_reason}")
+            self.assertGreater(result.diagnostics["pose_inlier_fraction"], 0.9)
 
     def test_excessive_reprojection_error_reject(self):
         scene = self.scene
