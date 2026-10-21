@@ -25,7 +25,12 @@
     "min_homography_advantage": 1.05,
     "max_dominant_homography_parallax_deg": 2.0,
     "max_reprojection_error_px": 3.0,
-    "max_depth_in_baselines": 200.0
+    "max_depth_in_baselines": 200.0,
+    "pose_stability_trials": 8,
+    "min_pose_stability_candidates": 4,
+    "min_pose_stability_accepted_trials": 4,
+    "max_median_rotation_disagreement_deg": 10.0,
+    "pose_stability_seed": 202
   },
   "visualization": {
     "max_drawn_matches": 100

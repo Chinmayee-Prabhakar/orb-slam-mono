@@ -35,6 +35,11 @@ class GeometryConfig:
     max_dominant_homography_parallax_deg: float = 2.0
     max_reprojection_error_px: float = 3.0
     max_depth_in_baselines: float = 200.0
+    pose_stability_trials: int = 8
+    min_pose_stability_candidates: int = 4
+    min_pose_stability_accepted_trials: int = 4
+    max_median_rotation_disagreement_deg: float = 10.0
+    pose_stability_seed: int = 202
 
     def __post_init__(self) -> None:
         thresholds = [self.ransac_confidence, self.ransac_threshold_px,
@@ -42,7 +47,8 @@ class GeometryConfig:
                       self.min_rotation_only_residual_px, self.min_point_parallax_deg,
                       self.min_median_parallax_deg, self.min_homography_coverage,
                       self.min_homography_advantage, self.max_dominant_homography_parallax_deg,
-                      self.max_reprojection_error_px, self.max_depth_in_baselines]
+                      self.max_reprojection_error_px, self.max_depth_in_baselines,
+                      self.max_median_rotation_disagreement_deg]
         if not np.all(np.isfinite(thresholds)):
             raise ValueError("Geometry thresholds must be finite")
         if (not 0 < self.ransac_confidence < 1
@@ -56,8 +62,22 @@ class GeometryConfig:
                self.min_point_parallax_deg,
                self.min_median_parallax_deg, self.max_reprojection_error_px,
                self.max_depth_in_baselines, self.max_dominant_homography_parallax_deg,
-               self.min_homography_advantage) <= 0 or not 0 < self.min_homography_coverage <= 1:
+               self.min_homography_advantage,
+               self.max_median_rotation_disagreement_deg) <= 0 or not 0 < self.min_homography_coverage <= 1:
             raise ValueError("Geometry thresholds must be positive")
+        if (not isinstance(self.pose_stability_trials, int) or self.pose_stability_trials < 0
+                or not isinstance(self.min_pose_stability_candidates, int)
+                or self.min_pose_stability_candidates < 1
+                or (self.pose_stability_trials > 0
+                    and self.min_pose_stability_candidates > self.pose_stability_trials)
+                or not isinstance(self.min_pose_stability_accepted_trials, int)
+                or isinstance(self.min_pose_stability_accepted_trials, bool)
+                or self.min_pose_stability_accepted_trials < 1
+                or (self.pose_stability_trials > 0
+                    and self.min_pose_stability_accepted_trials > self.pose_stability_trials)
+                or not isinstance(self.pose_stability_seed, int)
+                or self.pose_stability_seed < 0):
+            raise ValueError("Invalid pose-stability trial configuration")
 
 
 @dataclass
@@ -238,9 +258,9 @@ def filter_triangulated_points(
         angles[accepted], err1[accepted], err2[accepted], stage)
 
 
-def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
-                        camera: CalibratedCamera,
-                        config: Optional[GeometryConfig] = None) -> InitializationResult:
+def _initialize_two_view_once(points1_px: np.ndarray, points2_px: np.ndarray,
+                              camera: CalibratedCamera,
+                              config: Optional[GeometryConfig] = None) -> InitializationResult:
     """Estimate a unit-baseline relative pose and filtered sparse 3D points.
 
     Input arrays are matching pixel coordinates in the same order. Every mask
@@ -262,6 +282,10 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
         "candidate_parallax_p90_deg": None, "median_accepted_parallax_deg": None,
         "median_reprojection_error_first_px": None,
         "median_reprojection_error_second_px": None,
+        "pose_stability_valid_candidates": None,
+        "pose_stability_provisional_candidates": None,
+        "pose_stability_accepted_trials": None,
+        "pose_stability_median_rotation_disagreement_deg": None,
     }
     result.diagnostics = counts
 
@@ -421,3 +445,63 @@ def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
     if counts["median_accepted_parallax_deg"] < cfg.min_median_parallax_deg:
         return finish("low_parallax")
     return finish(None)
+
+
+def initialize_two_view(points1_px: np.ndarray, points2_px: np.ndarray,
+                        camera: CalibratedCamera,
+                        config: Optional[GeometryConfig] = None) -> InitializationResult:
+    """Initialize once, then reject poses unstable to match-order perturbations.
+
+    The additional trials see the same 2D matches and calibration in permuted
+    order. They do not receive truth, alter the chosen pose, or set metric scale.
+    Rejected trials can still provide a provisional rotation for the angular
+    diagnostic, but only fully accepted trials satisfy the acceptance minimum.
+    """
+    cfg = config or GeometryConfig()
+    result = _initialize_two_view_once(points1_px, points2_px, camera, cfg)
+    if result.status != "accepted" or cfg.pose_stability_trials == 0:
+        return result
+    started = perf_counter()
+    first = np.asarray(points1_px, dtype=np.float64)
+    second = np.asarray(points2_px, dtype=np.float64)
+    rng = np.random.default_rng(cfg.pose_stability_seed)
+    disagreements = []
+    accepted_trials = 0
+    provisional_candidates = 0
+    for _ in range(cfg.pose_stability_trials):
+        order = rng.permutation(len(first))
+        trial = _initialize_two_view_once(first[order], second[order], camera, cfg)
+        if trial.status == "accepted":
+            accepted_trials += 1
+        rotation = (trial.R_21 if trial.R_21 is not None
+                    else trial.debug_provisional_R_21)
+        if rotation is not None:
+            if trial.status != "accepted":
+                provisional_candidates += 1
+            delta = rotation @ result.R_21.T
+            disagreements.append(float(np.degrees(np.arccos(
+                np.clip((np.trace(delta) - 1.0) / 2.0, -1.0, 1.0)))))
+    median_disagreement = None if not disagreements else float(np.median(disagreements))
+    counts = result.diagnostics
+    counts["pose_stability_valid_candidates"] = len(disagreements)
+    counts["pose_stability_provisional_candidates"] = provisional_candidates
+    counts["pose_stability_accepted_trials"] = accepted_trials
+    counts["pose_stability_median_rotation_disagreement_deg"] = median_disagreement
+    result.timing_ms["pose_stability"] = round((perf_counter() - started) * 1000, 3)
+    result.timing_ms["total"] = round(result.timing_ms["total"] + result.timing_ms["pose_stability"], 3)
+    if (len(disagreements) < cfg.min_pose_stability_candidates
+            or median_disagreement > cfg.max_median_rotation_disagreement_deg
+            or accepted_trials < cfg.min_pose_stability_accepted_trials):
+        result.status = "rejected"
+        result.failure_reason = ("insufficient_accepted_pose_stability_trials"
+                                 if (len(disagreements) >= cfg.min_pose_stability_candidates
+                                     and median_disagreement <= cfg.max_median_rotation_disagreement_deg)
+                                 else "unstable_pose_under_resampling")
+        result.debug_provisional_R_21 = result.R_21
+        result.debug_provisional_t_21 = result.t_21
+        result.R_21 = None
+        result.t_21 = None
+        result.points_xyz = np.empty((0, 3), dtype=np.float64)
+        result.accepted_mask = np.zeros_like(result.accepted_mask)
+        counts["usable_map_points"] = 0
+    return result
