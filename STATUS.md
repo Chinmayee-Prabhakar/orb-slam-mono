@@ -2,7 +2,47 @@
 
 ## Current milestone
 
-M2 — calibrated two-view initialization: **technical M2 acceptance complete for the defined tests and fixed validation sets**. The accepted-trial gate remains conservative; two outdated synthetic acceptance expectations were corrected after independent truth-based review. All 44 tests pass, and pair 20→25 remains rejected. The implementation is ready to support a bounded M3 proposal, but M3 has not started.
+M3 — adaptive initialization, persistent sparse map, and PnP tracking: **complete for the defined functional and validation criteria; real-image tracking continuity remains limited**. The preceding M2 checkpoint is local commit `be91d04ac5e0907c25201b013a3c9438ff8f3792`. All 62 tests pass, including the 44-test M2 baseline.
+
+## M3 — recovery-state closure audit
+
+- Reproduced the defect with a synthetic PnP loss at frame 7 and a three-frame recovery budget: frames 8–10 were initializing, frame 11 reported `recovery_window_exhausted`, and later frames repeatedly reported the same deadline while retaining the obsolete anchor. The old budget used source-index differences and `process()` cycled internally through LOST → INITIALIZING → LOST.
+- The corrected budget counts **processed frames after the failed PnP frame**, regardless of gaps in source indices. The final permitted frame may search; the next frame becomes terminal LOST, clears anchor and anchor image, skips further ORB/initialization work, and reports a null pose with `terminal_recovery_exhausted` on later frames. The first timeout frame reports `recovery_window_exhausted`. A caller starts a separate run by constructing a new `MonocularTracker`. The old accepted map and its observations remain frozen; no independent segments are joined.
+- Added regression coverage for success on the final permitted frame, timeout, later terminal frames without internal transitions, map/pose immutability after failed PnP, fresh-tracker restart, and nonconsecutive source IDs. Per-frame diagnostics now distinguish association candidates, filtered unique associations, PnP input count, whether RANSAC ran, returned inliers, PnP acceptance/rejection, recovery budget, and terminal loss. Summary distributions distinguish all tracking attempts, accepted tracking frames, and rejected solver returns. `recovery_events.json` records timeouts.
+- Full command `python -m unittest discover -s tests -v`: **62 tests passed, 0 failed, 0 skipped**. The corrected seed-19 synthetic run still accepts 0→3 with 229 points and tracks frames 4–11; offline known-baseline scoring remains median/max 0.416°/0.603° rotation error and 0.034/0.072 scene-unit center error. A separate ignored timeout scenario has 6 initializing, 4 tracking, 2 lost frames and exactly one recovery timeout at frame 11.
+- Original `artifacts/m3-kitti-00/` was preserved. The corrected full 0–299 run is in `artifacts/m3-kitti-00-corrected/`: **191 initializing, 97 tracking, 12 lost; 203/300 no pose; 84 PnP-tracked frames; 84 initialization attempts; 13 accepted pairs; 12 PnP failures; 12 reinitializations; 0 recovery timeouts**. Every frame's state, failure reason, segment ID, pose-valid flag, pose values, and camera center match the original run exactly. Map-point counts and accepted pairs also match; `comparison_with_original.json` records these checks. The longest valid segment has 13 poses.
+- Of the 12 PnP failures, 5 have insufficient correspondences and 7 have insufficient inliers. Across all tracking attempts, correspondence p10/median/p90 is 14/27/64; accepted-only is 18/29/66.7; rejected-only is 7.1/13/14.9. Returned RANSAC inlier p10/median/p90 is 12/24/55 across accepted and rejected solver returns, 13/25/55.7 for accepted frames, and 9.6/11/11 for rejected solver returns. The corrected run's median/p90 total processing time is **17.56/45.06 ms per frame**; ORB, association, initialization, PnP, and map-update medians are 12.32, 3.97, 15.61, 2.34, and 1.17 ms on frames where each stage runs.
+- Remaining risk: accepted M2 geometry and PnP inliers do not establish accurate long-run trajectory; the initial landmark set and anchor descriptors remain fixed, so KITTI segments are short. KITTI M3 segment pose accuracy is unmeasured. M4 map growth, keyframe maintenance, and bounded local optimization are the next development scope; none was implemented here.
+
+Reproduce from the project root in PowerShell:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.sequence_demo --mode synthetic --output-dir artifacts/m3-synthetic-corrected
+python -m orb_slam_mono.sequence_demo --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m3-kitti-00-corrected
+```
+
+## M3 — implementation and validation
+
+- Added `map_state.py` (`Frame`, `MapPoint`, `SparseMap`, tracking states and observation invariants), `tracking.py` (deterministic two-view retry, fixed-map descriptor association, calibrated PnP-RANSAC, loss/recovery), `synthetic_sequence.py` (physical multi-frame rendered images), `sequence_demo.py` (CSV/JSONL/pose/PLY/PNG exports), and `tests/test_m3.py`. M0–M2 source paths remain intact.
+- Default initialization attempts anchor gaps 3, 5, 7, 9, and 11; exhausted anchors are replaced. Rejected M2 geometry creates no map. A successful initializer transfers each accepted 3D point through the original match-array index to `queryIdx` and `trainIdx`. Tracking uses the initial map's anchor ORB descriptor per point and PnP inliers only for new observations. On failure, the current pose is null, the state is `lost`, and subsequent frames may initialize a new segment with distinct point IDs, origin, and arbitrary scale.
+- Synthetic seed 19, 12 frames, 0.22 scene-unit camera-center step: accepted pair 0→3, 229 initial points, 8 PnP-tracked frames, zero loss. Offline scoring using the known 0.6606 scene-unit initialization baseline only after estimation gives median/max rotation error **0.416°/0.603°** and camera-center error **0.034/0.072 scene units**. The tracker never receives the baseline or truth. A separate 18-frame synthetic test inserts a blank frame at 7: frame 7 is lost with no pose, 8–10 remain unestimated, and 8→11 initializes a new segment. Pure-rotation and tiny-baseline rendered sequences create no map.
+- Official KITTI odometry grayscale sequence 00, frames **0–299 inclusive**, original `P0`, all images in chronological order, unchanged shared thresholds: **191 initializing, 97 tracking, 12 lost**; 97 valid poses comprise 13 accepted initialization-second views and 84 PnP-tracked views. Thus **203/300 frames (67.7%) have no pose**, including initializing frames; the 4% `lost` fraction alone understates unavailability. There were 84 initialization attempts, 13 accepted pairs, 71 rejected pairs (39 low parallax, 19 low cheirality, 5 insufficient accepted stability trials, 6 insufficient essential inliers, 2 insufficient correspondences), 12 PnP failures, and 12 fresh-map reinitializations. PnP failure reasons: 5 insufficient correspondences and 7 insufficient inliers. Median/p10 PnP inliers are 24/12; median correspondences 27. The longest valid segment is 13 poses. All 300 frames have explicit diagnostics; missing poses remain null. No ground truth was read by the sequence runner.
+- Full-run CPU timing from the final `summary.json`: median/p90 total processing **17.10/43.26 ms per frame**; ORB median 12.66 ms, association 3.23 ms, initialization attempt 14.44 ms, PnP 1.92 ms, and map update 1.15 ms on frames where each stage runs. These are process-local stage timings, with startup and image I/O effects; no real-time guarantee follows.
+- The initial M3 implementation passed **58/58 tests, zero failures**. The optional KITTI smoke test uses the local subset and skips cleanly if absent. The M2 44-test baseline passed before M3 edits. The existing M1/M2 demos and diagnostics were not modified.
+- Outputs: `artifacts/m3-synthetic/`, `artifacts/m3-kitti-00-smoke/`, and `artifacts/m3-kitti-00/`. The full folder contains `per_frame.csv`, `per_frame.jsonl`, `summary.json`, `estimated_poses.json`, `initialization_attempts.json`, `loss_events.json`, state/inlier/reprojection PNGs, correspondence views, and one PLY per segment under `maps/`. All are Git-ignored.
+- Limitation: short KITTI segments result mainly from declining fixed-map descriptor associations and inlier counts; no map expansion or descriptor fusion is present. Pose accuracy of the 300-frame estimated segments has **not** been independently scored against KITTI truth, so do not infer trajectory accuracy. M3 provides a working sequential path and transparent failure reporting, but robust real-world continuity remains a bounded correction target before M4 optimization. No M4 code was added.
+
+Reproduce from the project root in PowerShell:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -q
+python -m orb_slam_mono.sequence_demo --mode synthetic --output-dir artifacts/m3-synthetic
+python -m orb_slam_mono.sequence_demo --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 100 --output-dir artifacts/m3-kitti-00-smoke
+python -m orb_slam_mono.sequence_demo --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m3-kitti-00
+```
 
 ## M2 — test-expectation review and closure
 
@@ -158,8 +198,8 @@ python -m orb_slam_mono.geometry_demo --mode kitti --kitti-sequence data/sequenc
 - Blender 3.5.1 is installed at `C:\Program Files\Blender Foundation\Blender 3.5\blender.exe`. A later optional Blender importer may use OptiX after verification, with CPU fallback. The current PLY/JSON export is independent of Blender.
 - The official KITTI sequence-00 grayscale subset is installed and tested. TUM data remains unavailable. The original seven-pair M2 run measured initialization behavior on real rectified images; the later offline truth comparison above quantifies its pose accuracy and confirms the 20→25 false acceptance.
 - Monocular scale is arbitrary and may drift in later sequence tracking. Unit-baseline M2 points are not metric; no ground-truth pose/depth enters estimation. Pose errors cause 3D depth error even when reprojection errors are small. Homography dominance is deliberately conservative but may reject a legitimate planar, very low-parallax pair.
-- No persistent map, PnP tracking, keyframes, bundle adjustment, trajectory estimation, or loop closure exists.
+- M3 now has a persistent per-segment sparse map, PnP tracking, and an estimated pose sequence with explicit gaps. Keyframe maintenance, bundle adjustment, full offline trajectory evaluation, and loop closure remain unimplemented.
 
 ## Next recommended task
 
-Propose a bounded M3 map-based tracking milestone with explicit observation identities, calibrated PnP, tracking states, and initialization retry after sufficient motion. The conservative held-out rejection rate remains a useful M3 failure-analysis target; do not use truth to tune per-pair thresholds. M3 has not started. Any future commit requires separate explicit approval and newly supplied author and committer dates with timezone; do not reuse a previous authorization.
+Review the corrected M3 artifacts. The next bounded M4 task is map growth and keyframe maintenance, followed by sparse local bundle adjustment over roughly 5–10 keyframes; measure whether this extends short KITTI segments without relaxing M2 quality gates or merging independent scales. M4 remains unstarted. Any future commit requires separate explicit approval and newly supplied author and committer dates with timezone; do not reuse a previous authorization.

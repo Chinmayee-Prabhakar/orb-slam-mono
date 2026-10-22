@@ -1,6 +1,6 @@
 # orb-slam-mono
 
-An independent, inspectable Python/OpenCV monocular visual SLAM project. M2 estimates a calibrated **two-view relative pose and sparse 3D initialization**. It does not track a sequence or maintain a persistent map. Recovered translation and 3D coordinates have arbitrary monocular scale.
+An independent, inspectable Python/OpenCV monocular visual SLAM project. M3 extends calibrated two-view initialization to a persistent sparse map and sequential map-to-image PnP tracking. Every map segment has its own arbitrary monocular origin and scale; invalid frame poses remain null.
 
 ## Layout
 
@@ -16,6 +16,10 @@ An independent, inspectable Python/OpenCV monocular visual SLAM project. M2 esti
 | `src/orb_slam_mono/geometry.py` | Essential matrix, relative pose, triangulation filters, initialization decision |
 | `src/orb_slam_mono/synthetic3d.py` | Reproducible physical 3D benchmark and rendered ORB image pair |
 | `src/orb_slam_mono/geometry_demo.py` | M2 CLI, diagnostics, images, PLY/JSON export |
+| `src/orb_slam_mono/map_state.py` | Frame, map-point, segment, and observation identity invariants |
+| `src/orb_slam_mono/tracking.py` | Adaptive initializer, map associations, calibrated PnP, states and recovery |
+| `src/orb_slam_mono/synthetic_sequence.py` | Physical multi-view rendered-image fixture with separate truth |
+| `src/orb_slam_mono/sequence_demo.py` | M3 sequential runner, per-frame diagnostics, plots, poses, and PLY exports |
 | `src/orb_slam_mono/kitti_pose_evaluation.py` | Offline KITTI relative-pose scoring; never imported by the estimator |
 | `configs/default.json` | Tunable ORB, matching, geometry, and visualization settings |
 | `scripts/extract_kitti_00_subset.py` | Selective ZIP extraction with byte/CRC verification |
@@ -23,6 +27,27 @@ An independent, inspectable Python/OpenCV monocular visual SLAM project. M2 esti
 | `scripts/summarize_kitti_00.py` | Fixed-pair CSV/JSON validation summary |
 | `scripts/audit_kitti_correspondences.py` | Original 20→25 correspondence and model-stability audit |
 | `tests/` | Standard-library unit tests, including optional local KITTI smoke test |
+
+## M3 sequential demonstration
+
+From the project root with CPU NumPy and OpenCV installed:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m orb_slam_mono.sequence_demo --mode synthetic --output-dir artifacts/m3-synthetic-corrected
+python -m orb_slam_mono.sequence_demo --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 100 --output-dir artifacts/m3-kitti-00-smoke
+python -m orb_slam_mono.sequence_demo --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m3-kitti-00-corrected
+python -m unittest discover -s tests -v
+python -m unittest tests.test_m3.StateTests.test_recovery_budget_exhaustion_is_terminal_and_clears_anchor -v
+```
+
+The ignored output directory contains `per_frame.csv`, `per_frame.jsonl`, `summary.json`, `initialization_attempts.json`, `loss_events.json`, `recovery_events.json`, `estimated_poses.json`, `tracking_states.png`, `pnp_inliers.png`, `reprojection_px.png`, correspondence views under `visualizations/`, and per-segment `maps/segment-*.ply` plus top-down `maps/segment-*.png`. The CSV has one explicit outcome for every processed frame. `estimated_poses.json` uses world-to-camera `T_cw`, reports camera centers as `-R_cw.T @ t_cw`, and leaves failed or pre-initialization poses null. Separate segment coordinates and scales must not be joined without a separate alignment. Original M3 outputs remain under `artifacts/m3-synthetic/` and `artifacts/m3-kitti-00/`.
+
+Default initialization attempts anchor gaps 3, 5, 7, 9, and 11, then replaces an exhausted anchor. It reuses M2 geometry thresholds and only maps accepted triangulations using original ORB keypoint identities. Tracking matches current ORB features against fixed initial map descriptors and accepts PnP only after RANSAC, inlier, positive-depth, and reprojection checks. A loss records no current pose; recovery starts a new segment. Tune only through `configs/default.json` after controlled validation.
+
+`tracking.max_recovery_frames` (default 60) counts processed frames **after** failed PnP; skipped source indices do not consume the budget. The final permitted frame may search. If still unsuccessful, the next frame enters terminal LOST, clears the anchor, and all later chronological frames remain pose-null without another initialization attempt. Construct a fresh tracker for a separate run. Per-frame output distinguishes association candidates, unique descriptor matches, PnP input and returned inliers, accepted/rejected PnP, and terminal loss. Summary distributions label all tracking attempts, accepted frames, and rejected solver returns separately; missing solver inlier counts remain null.
+
+M3 meets its defined functional and validation criteria. The physical seed-19 synthetic run initializes 0→3 with 229 points and tracks eight later frames. Its offline known-baseline comparison gives median/max rotation error 0.416°/0.603° and position error 0.034/0.072 scene units. A separate synthetic timeout scenario is saved under `artifacts/m3-synthetic-recovery-timeout/`. On official KITTI 00 frames 0–299, the unchanged defaults produce 84 PnP-tracked frames, 13 accepted initialization pairs, 12 losses, 191 initializing frames, and zero recovery timeouts. The corrected run reproduces every original decision and accepted pose. The longest segment has 13 valid poses, showing limited continuity with fixed landmarks and single anchor descriptors. KITTI M3 trajectory accuracy has not been independently evaluated; no ground-truth pose enters this runner. All **62 tests pass**, including the 44 M2 baseline tests.
 
 ## Reproduce on Windows PowerShell
 
@@ -106,7 +131,7 @@ The original M1 `stats.json` fields and their meanings are unchanged. In M2, `re
 
 Initialization also requires pose cheirality support from at least 90% of essential inliers, a median rotation-only fit residual above 1.5 px, and pose stability across permuted match order. On rejection, `R_21`, `t_21_unit`, and camera-2 pose are `null`, the public map is empty, and PLY contains zero vertices. `diagnostics.accepted_points` remains the **provisional triangulation-filter survivor count**; `diagnostics.usable_map_points` is zero. Rejected PNGs are labeled diagnostic only. A rerun replaces the demo's own artifact files so an earlier successful map does not linger.
 
-The accepted-trial minimum is configured as `geometry.min_pose_stability_accepted_trials` (default 4). `pose_stability_valid_candidates` counts all trial rotations, `pose_stability_provisional_candidates` counts rotations from rejected trials, and `pose_stability_accepted_trials` counts full successes. `insufficient_accepted_pose_stability_trials` means the angle statistic passed but too few trials produced a usable initialization. Set `pose_stability_trials` to 0 only for a controlled one-shot comparison. This stricter gate leaves the fixed KITTI decisions unchanged. Two earlier synthetic acceptance expectations were corrected after truth-based review: small translation with moderate rotation (1.212°/10.065° one-shot rotation/direction errors; 2/8 accepted trials) and a planar scene (3.798°/24.258°; 1/8) are conservatively rejected. The full suite passes **44/44 tests**. M2 is technically ready to support M3, where a sequence-level initializer could wait for sufficient motion and retry another image pair; that logic is not part of M2.
+The accepted-trial minimum is configured as `geometry.min_pose_stability_accepted_trials` (default 4). `pose_stability_valid_candidates` counts all trial rotations, `pose_stability_provisional_candidates` counts rotations from rejected trials, and `pose_stability_accepted_trials` counts full successes. `insufficient_accepted_pose_stability_trials` means the angle statistic passed but too few trials produced a usable initialization. Set `pose_stability_trials` to 0 only for a controlled one-shot comparison. This stricter gate leaves the fixed KITTI decisions unchanged. Two earlier synthetic acceptance expectations were corrected after truth-based review: small translation with moderate rotation (1.212°/10.065° one-shot rotation/direction errors; 2/8 accepted trials) and a planar scene (3.798°/24.258°; 1/8) are conservatively rejected. The full suite passes **44/44 tests**. At M2 closure, its geometry was ready for M3; the subsequently implemented sequence-level initializer waits for sufficient motion and retries another image pair without changing M2 geometry.
 
 KITTI pose-file rows are camera-to-first-camera/world `T_wc`. Offline scoring forms `T_cj_ci = inverse(T_wc_j) @ T_wc_i`, then compares rotation and translation **direction** to the estimate. True baseline magnitude is reported for evaluation only; two-view monocular output remains arbitrary-scale. No two-view result measures sequence tracking or drift.
 
