@@ -47,6 +47,42 @@
     "max_p90_reprojection_px": 4.0,
     "max_recovery_frames": 60
   },
+  "mapping": {
+    "enabled": false,
+    "update_descriptors": false,
+    "min_keyframe_gap": 5,
+    "max_keyframe_gap": 10,
+    "min_tracked_fraction": 0.6,
+    "min_center_baseline": 0.5,
+    "window_size": 8,
+    "min_triangulation_baseline": 0.08,
+    "min_parallax_deg": 0.7,
+    "max_reprojection_px": 3.0,
+    "max_depth_baselines": 200.0,
+    "duplicate_distance_baselines": 0.025,
+    "max_new_points_per_keyframe": 80,
+    "max_active_points": 1000,
+    "stale_after_frames": 25,
+    "descriptor_evidence_limit": 8,
+    "cull_after_observations": 3,
+    "max_point_median_reprojection_px": 6.0
+  },
+  "bundle_adjustment": {
+    "enabled": false,
+    "every_n_keyframes": 2,
+    "max_points": 60,
+    "max_observations": 300,
+    "min_points": 12,
+    "max_nfev": 12,
+    "loss": "soft_l1",
+    "loss_scale_px": 2.0,
+    "max_median_reprojection_px": 4.0,
+    "max_heldout_increase_px": 0.5,
+    "max_heldout_p90_increase_px": 1.0,
+    "max_heldout_max_increase_px": 2.0,
+    "max_validation_reprojection_px": 4.0,
+    "min_validation_observations": 10
+  },
   "visualization": {
     "max_drawn_matches": 100
   }

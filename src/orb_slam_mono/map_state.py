@@ -49,16 +49,45 @@ class MapPoint:
     descriptor: np.ndarray
     observations: dict[int, int] = field(default_factory=dict)
     valid: bool = True
+    descriptor_evidence: list[np.ndarray] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.xyz_world = np.asarray(self.xyz_world, dtype=np.float64).reshape(3)
         self.descriptor = np.asarray(self.descriptor)
         if not np.all(np.isfinite(self.xyz_world)) or self.descriptor.shape != (32,) or self.descriptor.dtype != np.uint8:
             raise ValueError("Map point requires finite xyz and one uint8 ORB descriptor")
+        if not self.descriptor_evidence:
+            self.descriptor_evidence = [self.descriptor.copy()]
 
     @property
     def observation_count(self) -> int:
         return len(self.observations)
+
+    def update_descriptor(self, descriptor: np.ndarray, limit: int = 8) -> None:
+        """Bounded FIFO evidence; representative is the deterministic Hamming medoid."""
+        value = np.asarray(descriptor)
+        if value.shape != (32,) or value.dtype != np.uint8 or limit < 1:
+            raise ValueError("Invalid ORB descriptor evidence")
+        self.descriptor_evidence.append(value.copy())
+        self.descriptor_evidence = self.descriptor_evidence[-limit:]
+        evidence = np.stack(self.descriptor_evidence)
+        distances = np.unpackbits(np.bitwise_xor(evidence[:, None, :],
+                                                 evidence[None, :, :]), axis=2).sum(axis=2)
+        self.descriptor = self.descriptor_evidence[int(np.argmin(distances.sum(axis=1)))].copy()
+
+
+@dataclass
+class Keyframe:
+    """Persistent mapping view; the referenced Frame owns its pose and features."""
+    frame_id: int
+    segment_id: int
+    frame: Frame
+
+    def __post_init__(self) -> None:
+        if self.frame.frame_id != self.frame_id or self.frame.R_cw is None or self.frame.t_cw is None:
+            raise ValueError("Keyframe needs a matching frame with a valid pose")
+        if not np.all(np.isfinite(self.frame.R_cw)) or not np.all(np.isfinite(self.frame.t_cw)):
+            raise ValueError("Keyframe pose must be finite")
 
 
 @dataclass
@@ -68,6 +97,8 @@ class SparseMap:
     second_frame_id: int
     frames: dict[int, Frame] = field(default_factory=dict)
     points: dict[int, MapPoint] = field(default_factory=dict)
+    keyframes: dict[int, Keyframe] = field(default_factory=dict)
+    active_keyframe_ids: list[int] = field(default_factory=list)
     coordinate_convention: str = "T_cw; first camera is world origin; arbitrary unit baseline"
 
     def add_observation(self, point_id: int, frame: Frame, feature_index: int) -> None:
@@ -82,9 +113,16 @@ class SparseMap:
         frame.feature_to_point[feature_index] = point_id
 
     def validate(self) -> None:
+        if len(self.active_keyframe_ids) != len(set(self.active_keyframe_ids)) or any(
+                frame_id not in self.keyframes for frame_id in self.active_keyframe_ids):
+            raise ValueError("Invalid active keyframe window")
+        for frame_id, keyframe in self.keyframes.items():
+            if (keyframe.segment_id != self.segment_id or frame_id not in self.frames
+                    or self.frames[frame_id] is not keyframe.frame):
+                raise ValueError("Keyframe segment or frame reference mismatch")
         for point_id, point in self.points.items():
-            if not point.valid or not np.all(np.isfinite(point.xyz_world)):
-                raise ValueError("Invalid active map point")
+            if not np.all(np.isfinite(point.xyz_world)):
+                raise ValueError("Invalid map point coordinates")
             for frame_id, feature_index in point.observations.items():
                 if frame_id not in self.frames or self.frames[frame_id].feature_to_point.get(feature_index) != point_id:
                     raise ValueError("Broken point-to-frame reference")

@@ -28,14 +28,15 @@ class SyntheticSequence:
 
 
 def generate_sequence(seed: int = 19, count: int = 12, metric_step: float = 0.22,
-                      blank_frames: tuple[int, ...] = ()) -> SyntheticSequence:
+                      blank_frames: tuple[int, ...] = (),
+                      vary_visibility: bool = False) -> SyntheticSequence:
     if count < 5 or metric_step < 0:
         raise ValueError("Require at least five frames and nonnegative baseline")
     rng = np.random.default_rng(seed)
     camera = CalibratedCamera(960, 600, 650.0, 650.0, 480.0, 300.0)
-    world = np.column_stack((rng.uniform(-4.0, 5.0, 1800),
-                             rng.uniform(-2.5, 2.5, 1800),
-                             rng.uniform(5.0, 13.0, 1800)))
+    world = np.column_stack((rng.uniform(-7.0, 11.0, 2600) if vary_visibility else rng.uniform(-4.0, 5.0, 1800),
+                             rng.uniform(-2.5, 2.5, 2600 if vary_visibility else 1800),
+                             rng.uniform(5.0, 13.0, 2600 if vary_visibility else 1800)))
     rotations: list[np.ndarray] = []
     translations: list[np.ndarray] = []
     projections: list[np.ndarray] = []
@@ -49,23 +50,27 @@ def generate_sequence(seed: int = 19, count: int = 12, metric_step: float = 0.22
         rotations.append(rotation)
         translations.append(translation)
         projections.append(uv)
-    visible = np.ones(len(world), dtype=bool)
-    for uv in projections:
-        visible &= ((uv[:, 0] >= 18) & (uv[:, 0] < camera.width - 18)
-                    & (uv[:, 1] >= 18) & (uv[:, 1] < camera.height - 18))
+    per_view_visible = [((uv[:, 0] >= 18) & (uv[:, 0] < camera.width - 18)
+                         & (uv[:, 1] >= 18) & (uv[:, 1] < camera.height - 18))
+                        for uv in projections]
+    visible = (np.sum(per_view_visible, axis=0) >= 3 if vary_visibility
+               else np.logical_and.reduce(per_view_visible))
     candidates = np.flatnonzero(visible)
     rng.shuffle(candidates)
     selected: list[int] = []
     for candidate in candidates:
-        if all(all(np.linalg.norm(projections[view][candidate] - projections[view][other]) >= 24
+        if all(all(not (per_view_visible[view][candidate] and per_view_visible[view][other])
+                   or np.linalg.norm(projections[view][candidate] - projections[view][other]) >= 24
                    for other in selected) for view in range(count)):
             selected.append(int(candidate))
-        if len(selected) == 270:
+        if len(selected) == (400 if vary_visibility else 270):
             break
     images = [np.full((camera.height, camera.width), 20, dtype=np.uint8) for _ in range(count)]
     for landmark in selected:
         patch = rng.integers(35, 240, (19, 19), dtype=np.uint8)
         for view, image in enumerate(images):
+            if not per_view_visible[view][landmark]:
+                continue
             x, y = np.rint(projections[view][landmark]).astype(int)
             image[y - 9:y + 10, x - 9:x + 10] = patch
     samples = [ImageSample(index, np.full_like(image, 20) if index in blank_frames else image,

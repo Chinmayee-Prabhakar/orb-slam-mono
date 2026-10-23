@@ -7,3 +7,4 @@ dependencies:
   - pip:
       - numpy>=1.23,<2
       - opencv-python-headless>=4.8,<4.11
+      - scipy>=1.10,<2

@@ -2,7 +2,66 @@
 
 ## Current milestone
 
-M3 — adaptive initialization, persistent sparse map, and PnP tracking: **complete for the defined functional and validation criteria; real-image tracking continuity remains limited**. The preceding M2 checkpoint is local commit `be91d04ac5e0907c25201b013a3c9438ff8f3792`. All 62 tests pass, including the 44-test M2 baseline.
+M4 — keyframe management, map growth, descriptor maintenance, and sparse local BA: **complete for defined functional and safety criteria; real BA benefit remains unproven**. The preceding M3 checkpoint is local commit `c3dae6f6e73624a442d8bcd585cbd282c843a26c`. The original 80-test M4 baseline passed before correction; the corrected suite passes **89/89 with no skips**.
+
+## M4 — implementation and fixed validation
+
+The results in this section are the **original, preserved M4 comparison**. The targeted correction and separate reruns appear in the next section.
+
+- Added persistent segment-local `Keyframe` records and an eight-keyframe active window that retains the two fixed initialization views. A tracked frame is eligible after five frames and is inserted for low tracked-feature coverage (<0.6 of the prior keyframe), ≥0.5 arbitrary-unit estimated center displacement, or a ten-frame maximum gap. Rejected PnP frames never become keyframes. Historical records stay available; the optimizer uses only the bounded active window.
+- New landmarks arise from descriptor matches between keyframes with unassigned original ORB indices. Triangulation uses calibrated pixel projections `K[R_cw|t_cw]` in the existing segment scale, then filters homogeneous validity, positive depth, ≥0.7° ray parallax, ≤3 px reprojection in each view, depth ≤200 pair baselines, and nearby 3D duplicates. A keyframe inserts at most 80 points. Only accepted PnP observations refresh a landmark's bounded eight-descriptor Hamming medoid. Points with persistent reprojection disagreement may become inactive without deleting reciprocal observations; none were culled in the fixed KITTI run.
+- Local BA uses SciPy sparse-Jacobian `least_squares`, soft-L1 robust pixel residuals, at most eight active keyframes, 60 landmarks, 300 observations, and 12 function evaluations. The first and second initialization poses stay fixed, preserving segment origin, orientation, and the unit initialization baseline. Candidate updates remain temporary until finite geometry, positive depth, cost, median reprojection, and held-out checks pass. Failed optimization leaves the map unchanged. Mapping exceptions leave an accepted PnP pose valid. No truth, metric scale, or cross-segment alignment enters estimation.
+- Before M4 changes, the complete suite passed **62/62**. After implementation, `python -m unittest discover -s tests -v` passed **80/80, zero failures and zero skips**. Tests cover exact projection, noisy BA, fixed gauge, sparse Jacobian pattern and finite-difference support, underconstrained/invalid-depth rejection, outlier and nonfinite failures, rollback, keyframe window/segment identity, triangulation identity, bounded descriptor evidence, mapping failure safety, fresh segment recovery, real KITTI smoke, and the unchanged M1–M3 regressions.
+- The fixed four-way KITTI 00 0–299 run is in ignored `artifacts/m4-kitti-00-final/`. Its baseline exactly matches all 300 frozen M3 state, pose, failure-reason, and segment-ID records. Each configuration processed every frame with the same M2/PnP gates. Results:
+
+| Configuration | Valid poses | PnP frames | No pose | Losses | Longest valid span | Keyframes | New points | BA accepted/attempted |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| M3 baseline | 97 | 84 | 203 | 12 | 13 | 0 | 0 | 0/0 |
+| Growth | 126 | 117 | 174 | 9 | 30 | 37 | 1,451 | 0/0 |
+| Growth + descriptors | 145 | 136 | 155 | 8 | 34 | 41 | 1,791 | 0/0 |
+| Full M4 | 144 | 137 | 156 | 6 | 60 | 38 | 1,816 | 4/10 |
+
+- Full M4 had seven accepted initialization pairs, six fresh-map recoveries, zero recovery timeouts, 2,560 valid landmarks across historical segments, 368 active points in the final segment, and 11,810 recorded observations. The four applied BA windows reduced median training reprojection from 0.530 to 0.484 px (median across those windows), and median squared residual sum from 187.21 to 83.61. Six other BA windows reduced their training cost but were rejected because held-out reprojection worsened. Full-run BA median runtime was 798.89 ms per attempted window; local triangulation median was 35.93 ms per insertion. Total per-frame processing median/p90 was 16.54/57.21 ms and summed to 15.47 s, versus the frozen M3 17.56/45.06 ms and 11.84 s; machine timing varies between runs, so pose counts and the paired baseline are the stronger comparison. The initial unbounded smoke reached 2,057 new points in 101 frames and 642/2,423 ms median/p90; the bounded development configuration reduced that smoke to 758 new points and 226/2,016 ms before the fixed full-range run. Those smoke outputs are preserved separately.
+- A separate deterministic rendered sequence with landmarks entering and leaving view produced 12, 13, 15, and 15 valid poses for the four configurations, with 0, 160, 160, and 160 image-triangulated new points. First-segment full-M4 offline known-baseline scoring over 15 poses gives median/max 1.265°/2.059° rotation and 0.145/0.346 scene-unit center error. Accuracy did not improve monotonically with pose coverage; synthetic truth was used only after estimation. The full configuration applied one BA window on this sequence.
+- Remaining limits: **156/300 KITTI frames still have no valid pose**, and M4 segment trajectory accuracy has not been independently scored against KITTI truth. Fixed ORB matching, conservative M2 initialization, finite feature overlap, and disconnected fresh-map scales still limit continuity. BA improved some local residuals but did not improve total valid-pose count over descriptor maintenance alone. No points met the conservative culling rule in this fixed run, so real-data culling benefit is unproven. No global optimization, loop closure, or M5 trajectory-evaluation framework was added.
+
+Reproduce from the project root in PowerShell:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.m4_ablation --mode synthetic --vary-visibility --output-dir artifacts/m4-synthetic-varied-final
+python -m orb_slam_mono.m4_ablation --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m4-kitti-00-final
+```
+
+## M4 — affected-observation, capacity, and export correction
+
+- The original BA held-out selection required `frame_id in poses`, so it missed stored observations in non-keyframes and historical keyframes outside the active window when their landmark moved. A controlled 30-landmark counterexample improves training median error 6.649→<0.001 px but worsens the outside frame median from <0.001 to 6.649 px (maximum 9.533 px; 30 newly over 4 px); the corrected gate rejects it transactionally. All untrained stored observations affected by an optimized landmark or camera are checked with their actual pixel/keypoint and fixed or candidate `T_cw` as appropriate. The event records total and outside-window validation counts, before/after median, p90, maximum pixels, and newly over-4-px observations. At least ten validation observations are required.
+- A finite budget-terminated SciPy result (`solver_success=false`, `solver_status=0`, `nfev=12`) may still be applied only if training geometry/cost, proper rotation, positive depth, fixed gauge, and external median/p90/max/new-quality gates all pass. Solver failures reject. The noisy-map test with outside observations and a controlled safe budget candidate apply; an unsafe candidate and one without validation reject. Both initialization cameras remain fixed, which preserves the initial scale but can retain pose bias. The sparse graph must connect both fixed anchors after caps.
+- `max_active_points=1000` is now a hard **per-segment active** bound. Existing overfull maps deterministically deactivate stale points first, then lower-support and older points, retaining all reciprocal identities; new geometrically valid proposals fill only remaining slots. Historical inactive points/segments still consume storage. The fixed KITTI rerun peaked at 670 active points and culled none, so its behavior did not exercise the bound.
+- `per_frame.jsonl` remains the online chronological pose record. `estimated_poses.json` revises online-valid keyframe poses after BA; its unestimated anchor frame remains null. `final_keyframes.json` exports all final keyframe poses, including that anchor. The final segment map PNG plots these poses with final landmarks; the baseline without keyframes retains its online trajectory view. Segment-local PLY contains final landmarks. No rejected candidate reaches those exports.
+- Final ignored reruns are `artifacts/m4-synthetic-varied-ba-validation-final/` and `artifacts/m4-kitti-00-ba-validation-final/`; preliminary corrected runs remain separate, and original outputs above remain unchanged. On synthetic varied visibility, valid poses remain **12/13/15/15** and new points **0/160/160/160**. The full candidate is now rejected (0/1 applied): training median 0.401→0.307 px, but 828 validation measurements (465 outside-window) have median 0.919→1.360 px, p90 1.922→4.690 px, maximum 3.267→8.767 px, and 115 newly exceed 4 px. Full first-segment offline known-baseline errors now match descriptor-only: median/max rotation **1.414°/2.093°**, center **0.145/0.347** scene units across 15 poses. Truth enters only this offline score.
+
+| KITTI 00 configuration | Original valid / longest | Corrected valid / longest | Corrected new points | Corrected BA applied |
+| --- | ---: | ---: | ---: | ---: |
+| M3 baseline | 97 / 13 | 97 / 13 | 0 | 0/0 |
+| Growth | 126 / 30 | 126 / 30 | 1,451 | 0/0 |
+| Growth + descriptors | 145 / 34 | 145 / 34 | 1,791 | 0/0 |
+| Full M4 | 144 / 60 | 145 / 34 | 1,791 | 0/10 |
+
+- The first three corrected ablations match their original runs on all 300 frame states, valid poses, failure reasons, and segment identities. Full M4 now follows descriptor-only behavior: 136 PnP frames, 155 pose-null frames, eight tracking failures and fresh-map recoveries, 41 keyframes, 2,806 valid landmarks across historical segments, 355 active in its final segment, and zero culls. The ten BA candidates all reached the 12-evaluation budget and rejected for external regression. Their 2,768 outside-window validation observations include 538 newly above 4 px; median across attempts of training medians is 0.541→0.487 px, while validation medians are 0.759→1.057 px. Final corrected BA median runtime was 814 ms per attempt. Full per-frame runtime median/p90 was 16.30/55.45 ms, total 15.85 s. Timing is machine/run dependent; process peak RSS was not measured.
+- Corrected KITTI full M4 loses the original 60-pose continuity advantage because the four formerly applied windows fail stronger validation. The corrected longest span is 34; real trajectory accuracy remains unscored. This correction closes the identified safety defects, and M4 is accepted for its defined functional and safety criteria. Real-image BA benefit is not established. Original comparison, corrected comparison, BA events, per-frame diagnostics, and offline synthetic accuracy remain separately available.
+- The complete corrected command `python -m unittest discover -s tests -v` passed **89 tests, 0 failures, 0 errors, 0 skips**; its verbose output is `artifacts/m4-ba-validation-final-tests.txt`. Nine new cases cover harmful and safe outside-window updates, missing validation, a fixed landmark seen by an optimized camera, hard capacity and stale priority, disconnected graph, and final pose-stage selection. Original M0–M3 tests remain unchanged.
+
+Reproduce the corrected runs from the project root in PowerShell without overwriting the originals:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.m4_ablation --mode synthetic --vary-visibility --output-dir artifacts/m4-synthetic-varied-ba-validation-final
+python scripts/score_m4_synthetic_offline.py --results-dir artifacts/m4-synthetic-varied-ba-validation-final
+python -m orb_slam_mono.m4_ablation --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m4-kitti-00-ba-validation-final
+```
 
 ## M3 — recovery-state closure audit
 
@@ -198,8 +257,8 @@ python -m orb_slam_mono.geometry_demo --mode kitti --kitti-sequence data/sequenc
 - Blender 3.5.1 is installed at `C:\Program Files\Blender Foundation\Blender 3.5\blender.exe`. A later optional Blender importer may use OptiX after verification, with CPU fallback. The current PLY/JSON export is independent of Blender.
 - The official KITTI sequence-00 grayscale subset is installed and tested. TUM data remains unavailable. The original seven-pair M2 run measured initialization behavior on real rectified images; the later offline truth comparison above quantifies its pose accuracy and confirms the 20→25 false acceptance.
 - Monocular scale is arbitrary and may drift in later sequence tracking. Unit-baseline M2 points are not metric; no ground-truth pose/depth enters estimation. Pose errors cause 3D depth error even when reprojection errors are small. Homography dominance is deliberately conservative but may reject a legitimate planar, very low-parallax pair.
-- M3 now has a persistent per-segment sparse map, PnP tracking, and an estimated pose sequence with explicit gaps. Keyframe maintenance, bundle adjustment, full offline trajectory evaluation, and loop closure remain unimplemented.
+- M3 established a persistent per-segment sparse map, PnP tracking, and an estimated pose sequence with explicit gaps. M4 adds keyframes, map growth, descriptor maintenance, and bounded BA; its corrected real-data run applies no BA candidates. Full offline trajectory evaluation and loop closure remain unimplemented.
 
 ## Next recommended task
 
-Review the corrected M3 artifacts. The next bounded M4 task is map growth and keyframe maintenance, followed by sparse local bundle adjustment over roughly 5–10 keyframes; measure whether this extends short KITTI segments without relaxing M2 quality gates or merging independent scales. M4 remains unstarted. Any future commit requires separate explicit approval and newly supplied author and committer dates with timezone; do not reuse a previous authorization.
+M4 is complete for its defined functional and safety criteria. The corrected BA validation retains this tradeoff: 155 KITTI frames remain unestimated, all ten real BA windows reject, and the original 60-pose span falls to 34. The next bounded proposal is M5 offline segment-wise trajectory evaluation with explicit Sim(3) alignment, scale/drift reporting, and failure analysis; keep it separate from online tracking and do not connect independent segments without alignment. M5 remains unstarted. Any future commit requires separate explicit approval and newly supplied author and committer dates with timezone; do not reuse a previous authorization.

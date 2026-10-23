@@ -1,6 +1,6 @@
 # orb-slam-mono
 
-An independent, inspectable Python/OpenCV monocular visual SLAM project. M3 extends calibrated two-view initialization to a persistent sparse map and sequential map-to-image PnP tracking. Every map segment has its own arbitrary monocular origin and scale; invalid frame poses remain null.
+An independent, inspectable Python/OpenCV monocular visual SLAM project. M4 adds keyframes, image-based map growth, bounded ORB descriptor evidence, and sparse local bundle adjustment to M3's sequential PnP tracker. Every map segment has its own arbitrary monocular origin and scale; invalid frame poses remain null.
 
 ## Layout
 
@@ -20,13 +20,48 @@ An independent, inspectable Python/OpenCV monocular visual SLAM project. M3 exte
 | `src/orb_slam_mono/tracking.py` | Adaptive initializer, map associations, calibrated PnP, states and recovery |
 | `src/orb_slam_mono/synthetic_sequence.py` | Physical multi-view rendered-image fixture with separate truth |
 | `src/orb_slam_mono/sequence_demo.py` | M3 sequential runner, per-frame diagnostics, plots, poses, and PLY exports |
+| `src/orb_slam_mono/local_mapping.py` | Keyframe policy, calibrated map growth, landmark quality |
+| `src/orb_slam_mono/bundle_adjustment.py` | Gauge-fixed sparse local reprojection optimization |
+| `src/orb_slam_mono/m4_ablation.py` | Four fixed M4 configurations and comparison CSV/JSON |
 | `src/orb_slam_mono/kitti_pose_evaluation.py` | Offline KITTI relative-pose scoring; never imported by the estimator |
 | `configs/default.json` | Tunable ORB, matching, geometry, and visualization settings |
 | `scripts/extract_kitti_00_subset.py` | Selective ZIP extraction with byte/CRC verification |
 | `scripts/extract_kitti_00_poses.py` | Extract sequence-00 ground truth to ignored offline data |
 | `scripts/summarize_kitti_00.py` | Fixed-pair CSV/JSON validation summary |
 | `scripts/audit_kitti_correspondences.py` | Original 20→25 correspondence and model-stability audit |
+| `scripts/score_m4_synthetic_offline.py` | Offline-only known-baseline scoring of saved M4 synthetic poses |
 | `tests/` | Standard-library unit tests, including optional local KITTI smoke test |
+
+## M4 keyframes, map growth, and local BA
+
+Install dependencies from `requirements.txt` (including CPU SciPy). From the project root in PowerShell:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.m4_ablation --mode synthetic --vary-visibility --output-dir artifacts/m4-synthetic-varied-final
+python -m orb_slam_mono.m4_ablation --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m4-kitti-00-final
+```
+
+Each ablation processes the same chronological frames and shared M2/PnP thresholds: `baseline` preserves M3 fixed landmarks and descriptors; `growth` adds keyframes and triangulation; `descriptors` also updates landmark Hamming medoids; `full` also schedules local BA. `comparison.csv` and `comparison.json` summarize the four runs. Each subfolder holds per-frame CSV/JSONL, keyframe/map/BA event JSON, state and count plots, segment-local PLY, correspondence images, and `estimated_poses.json`. M4 pose JSON distinguishes final BA-revised keyframe poses from online per-frame reports. Valid points across historical segments and points in the currently active segment are reported separately. All outputs stay under ignored `artifacts/`.
+
+On KITTI 00 frames 0–299, the four configurations yield **97, 126, 145, and 144 valid poses** and longest valid spans **13, 30, 34, and 60** respectively. Full M4 makes 1,816 new points, accepts 4/10 BA windows, and still has **156/300 frames without poses**. Six BA windows reject for held-out reprojection regression even though their training cost drops. KITTI M4 trajectory accuracy is not yet independently scored. The varying-visibility synthetic sequence uses projected landmarks with separate truth; it yields 12, 13, 15, and 15 valid poses. Full M4's first-segment offline median/max errors are 1.265°/2.059° in rotation and 0.145/0.346 scene units in center position after evaluation-only scale normalization. No ground-truth pose or scale enters tracking or BA.
+
+**These are the preserved original M4 results.** The targeted BA safety correction rechecks every stored observation affected by a proposed point or camera update, including frames outside the local optimization window. It also enforces the configured 1,000-point active capacity before admitting new landmarks and plots final adjusted keyframe poses with final map points. Under the corrected fixed KITTI 00 0–299 comparison, valid poses are **97, 126, 145, 145** and longest spans are **13, 30, 34, 34**. All ten full-M4 BA candidates terminate at the 12-evaluation budget and fail external validation; none are applied. The original 60-pose span is therefore not retained. The corrected varied-visibility synthetic comparison still has **12, 13, 15, 15** valid poses, but its one full-BA candidate is also rejected. Training reprojection improves while outside-window or other held-out measurements worsen. M4 is complete for its defined functional and safety criteria. Real-image BA benefit remains unproven; KITTI trajectory accuracy and drift are still unscored, and process peak RSS was not measured.
+
+Reproduce the corrected outputs into separate ignored directories:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.m4_ablation --mode synthetic --vary-visibility --output-dir artifacts/m4-synthetic-varied-ba-validation-final
+python scripts/score_m4_synthetic_offline.py --results-dir artifacts/m4-synthetic-varied-ba-validation-final
+python -m orb_slam_mono.m4_ablation --mode kitti --kitti-sequence data/sequences/00 --start 0 --end 299 --output-dir artifacts/m4-kitti-00-ba-validation-final
+```
+
+`ba_events.json` reports solver termination, training and external median/p90/maximum pixel errors, validation counts inside and outside the window, and newly over-limit measurements. A budget-terminated intermediate solution is eligible only if all geometric and external gates pass; lack of validation rejects it. `per_frame.jsonl` remains the online pose record. `estimated_poses.json` revises online-valid keyframe poses but keeps the unestimated anchor null in its chronological frame list. `final_keyframes.json` contains every final keyframe pose, including that anchor; segment-map PNGs use these final poses with final points. PLY files contain final points only, in arbitrary segment-local scale. The original `artifacts/m4-kitti-00-final/` and `artifacts/m4-synthetic-varied-final/` are unchanged.
+
+Keyframe insertion waits at least five frames and uses estimated viewpoint displacement, declining tracked coverage, or a ten-frame maximum gap. The active BA window has at most eight keyframes, including the two fixed initialization poses that remove pose and scale gauge freedoms. New points use estimated `T_cw` poses and `K[R|t]` pixel projections in the established segment scale. Descriptor evidence is a bounded set of eight actual ORB descriptors with a deterministic Hamming medoid. BA uses SciPy `least_squares` with sparse Jacobian structure and checks held-out observations before applying any update. See `NOTES.md` for thresholds and ownership rules.
 
 ## M3 sequential demonstration
 

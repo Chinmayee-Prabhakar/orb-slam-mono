@@ -18,6 +18,9 @@ from .geometry import GeometryConfig
 from .matching import DescriptorMatcher
 from .synthetic_sequence import generate_sequence
 from .tracking import MonocularTracker, TrackingConfig
+from .local_mapping import MappingConfig
+from .bundle_adjustment import BundleConfig
+from .map_state import SparseMap
 
 
 def _json_default(value: Any) -> Any:
@@ -86,8 +89,8 @@ def _write_ply(path: Path, points: list[np.ndarray]) -> None:
 
 
 def _draw_segment_map(path: Path, points: list[np.ndarray], poses: list[dict[str, Any]],
-                      segment_id: int) -> None:
-    """Top-down X/Z view; only pose-valid frames from this segment are connected."""
+                      segment_id: int, final_keyframes: bool = False) -> None:
+    """Top-down X/Z view with an explicit map/pose stage."""
     canvas = np.full((700, 900, 3), 255, np.uint8)
     centers = np.array([pose["camera_center_world"] for pose in poses], dtype=float).reshape(-1, 3)
     xyz = np.array(points, dtype=float).reshape(-1, 3)
@@ -107,20 +110,36 @@ def _draw_segment_map(path: Path, points: list[np.ndarray], poses: list[dict[str
             cv2.line(canvas, first, second, (180, 70, 40), 2)
         for center in projected_centers:
             cv2.circle(canvas, center, 4, (40, 40, 210), -1)
-    cv2.putText(canvas, f"Segment {segment_id}: X/Z, arbitrary scale; only valid poses",
+    stage = "final map/keyframes" if final_keyframes else "online map/trajectory"
+    cv2.putText(canvas, f"Segment {segment_id}: {stage}, arbitrary scale",
                 (20, 29), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (20, 20, 20), 2)
     cv2.imwrite(str(path), canvas)
 
 
+def _final_map_pose_records(segment: SparseMap,
+                            online_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Final-map plots use every adjusted keyframe, including the online-null anchor."""
+    if segment.keyframes:
+        return [{"frame_id": keyframe.frame_id, "segment_id": segment.segment_id,
+                 "pose_valid": True,
+                 "camera_center_world": keyframe.frame.camera_center_world.tolist()}
+                for keyframe in segment.keyframes.values()]
+    return [record for record in online_results
+            if record["segment_id"] == segment.segment_id and record["pose_valid"]]
+
+
 def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
                  kitti_sequence: Path | None = None, start: int = 0,
-                 end: int | None = None, seed: int = 19) -> dict[str, Any]:
+                 end: int | None = None, seed: int = 19,
+                 ablation: str | None = None,
+                 vary_visibility: bool = False) -> dict[str, Any]:
     if mode == "kitti":
         if kitti_sequence is None:
             raise ValueError("--kitti-sequence is required")
         sequence = KittiGraySequence(kitti_sequence)
     elif mode == "synthetic":
-        sequence = generate_sequence(seed=seed)
+        sequence = generate_sequence(seed=seed, vary_visibility=vary_visibility,
+                                     count=18 if vary_visibility else 12)
     else:
         raise ValueError("mode must be kitti or synthetic")
     if end is None:
@@ -128,11 +147,20 @@ def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
     if not 0 <= start <= end < len(sequence):
         raise ValueError("Invalid inclusive frame range")
     orb = config["orb"]
+    if ablation not in (None, "baseline", "growth", "descriptors", "full"):
+        raise ValueError("Unknown M4 ablation")
+    mapping_settings = dict(config.get("mapping", {}))
+    bundle_settings = dict(config.get("bundle_adjustment", {}))
+    if ablation is not None:
+        mapping_settings.update(enabled=ablation != "baseline",
+                                update_descriptors=ablation in ("descriptors", "full"))
+        bundle_settings["enabled"] = ablation == "full"
     tracker = MonocularTracker(
         sequence.camera,
         OrbExtractor(orb["nfeatures"], orb["scaleFactor"], orb["nlevels"], orb["fastThreshold"]),
         DescriptorMatcher(**config["matching"]), GeometryConfig(**config["geometry"]),
-        TrackingConfig(**config.get("tracking", {})))
+        TrackingConfig(**config.get("tracking", {})),
+        MappingConfig(**mapping_settings), BundleConfig(**bundle_settings))
     output_dir.mkdir(parents=True, exist_ok=True)
     visual_dir = output_dir / "visualizations"
     visual_dir.mkdir(exist_ok=True)
@@ -157,7 +185,7 @@ def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
     for record in results:
         d = record["diagnostics"]
         geometry = d.get("geometry", {})
-        rows.append({"frame": record["frame_id"], "state": record["state"],
+        row = {"frame": record["frame_id"], "state": record["state"],
                      "segment_id": record["segment_id"], "pose_valid": record["pose_valid"],
                      "failure_reason": record["failure_reason"], "features": d.get("features_detected"),
                      "map_points": d.get("map_points", d.get("available_map_points")),
@@ -187,7 +215,21 @@ def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
                      "initialization_ms": record["timing_ms"].get("initialization"),
                      "pnp_ms": record["timing_ms"].get("pnp"),
                      "map_update_ms": record["timing_ms"].get("map_update"),
-                     "total_ms": record["timing_ms"].get("total")})
+                     "total_ms": record["timing_ms"].get("total")}
+        if ablation is not None:
+            mapping = d.get("mapping", {})
+            ba = d.get("bundle_adjustment", {})
+            row.update(keyframe_inserted=d.get("keyframe_inserted", False),
+                       keyframes=d.get("keyframes"),
+                       new_points=mapping.get("new_points", 0),
+                       active_map_points=d.get("active_map_points"),
+                       culled_points=d.get("culled_points", 0),
+                       ba_status=ba.get("status"), ba_reason=ba.get("reason"),
+                       ba_initial_median_px=ba.get("initial_median_px"),
+                       ba_final_median_px=ba.get("final_median_px"),
+                       local_mapping_ms=record["timing_ms"].get("local_mapping"),
+                       bundle_adjustment_ms=record["timing_ms"].get("bundle_adjustment"))
+        rows.append(row)
     with (output_dir / "per_frame.csv").open("w", newline="", encoding="utf-8") as output:
         writer = csv.DictWriter(output, fieldnames=list(rows[0]))
         writer.writeheader()
@@ -201,26 +243,68 @@ def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
         json.dumps(tracker.loss_events, indent=2, default=_json_default) + "\n", encoding="utf-8")
     (output_dir / "recovery_events.json").write_text(
         json.dumps(tracker.recovery_events, indent=2, default=_json_default) + "\n", encoding="utf-8")
+    if ablation is not None:
+        for name, events in (("keyframe_events", tracker.keyframe_events),
+                             ("map_growth_events", tracker.mapping_events),
+                             ("ba_events", tracker.ba_events)):
+            (output_dir / f"{name}.json").write_text(
+                json.dumps(events, indent=2, default=_json_default) + "\n", encoding="utf-8")
     pose_export = {"pose_convention": "T_cw: X_c = R_cw X_w + t_cw",
                    "camera_center": "C_w = -R_cw.T @ t_cw",
                    "scale": "arbitrary per independent segment; no cross-segment alignment",
                    "invalid_poses": "null; frames before accepted second initialization view stay unestimated",
                    "frames": [{key: record[key] for key in ("frame_id", "segment_id", "pose_valid", "T_cw_R", "T_cw_t", "camera_center_world")}
                               for record in results]}
+    if ablation is not None:
+        pose_export["pose_stage"] = ("Final segment-local keyframe poses after accepted BA; "
+                                     "other valid poses remain their online PnP estimates. "
+                                     "Per-frame JSONL retains online published states.")
+        by_identity = {(record["segment_id"], record["frame_id"]): record
+                       for record in pose_export["frames"] if record["pose_valid"]}
+        for segment in tracker.segments:
+            for keyframe in segment.keyframes.values():
+                record = by_identity.get((segment.segment_id, keyframe.frame_id))
+                if record is not None:
+                    frame = keyframe.frame
+                    record["T_cw_R"] = frame.R_cw.tolist()
+                    record["T_cw_t"] = frame.t_cw.tolist()
+                    record["camera_center_world"] = frame.camera_center_world.tolist()
     (output_dir / "estimated_poses.json").write_text(json.dumps(pose_export, indent=2) + "\n", encoding="utf-8")
+    if ablation is not None:
+        final_keyframes = {"pose_convention": "T_cw: X_c = R_cw X_w + t_cw",
+                           "pose_stage": "Final segment-local keyframe state after accepted BA",
+                           "scale": "arbitrary per independent segment",
+                           "poses": [{"segment_id": segment.segment_id,
+                                      "frame_id": keyframe.frame_id,
+                                      "T_cw_R": keyframe.frame.R_cw.tolist(),
+                                      "T_cw_t": keyframe.frame.t_cw.tolist(),
+                                      "camera_center_world": keyframe.frame.camera_center_world.tolist()}
+                                     for segment in tracker.segments
+                                     for keyframe in segment.keyframes.values()]}
+        (output_dir / "final_keyframes.json").write_text(
+            json.dumps(final_keyframes, indent=2) + "\n", encoding="utf-8")
     map_dir = output_dir / "maps"
     map_dir.mkdir(exist_ok=True)
     for segment in tracker.segments:
         points = [point.xyz_world for point in segment.points.values() if point.valid]
         _write_ply(map_dir / f"segment-{segment.segment_id:03d}.ply", points)
         _draw_segment_map(map_dir / f"segment-{segment.segment_id:03d}.png", points,
-                          [record for record in results if record["segment_id"] == segment.segment_id
-                           and record["pose_valid"]], segment.segment_id)
+                          _final_map_pose_records(segment, results),
+                          segment.segment_id, bool(segment.keyframes))
     _plot([1 if row["state"] == "tracking" else 0 if row["state"] == "initializing" else -1 for row in rows],
           output_dir / "tracking_states.png", "Tracking state: tracking=1, initializing=0, lost=-1",
           (80, 100, 190), signed=True)
     _plot([row["pnp_inliers"] for row in rows], output_dir / "pnp_inliers.png", "PnP RANSAC inliers", (40, 150, 50))
     _plot([row["median_reprojection_px"] for row in rows], output_dir / "reprojection_px.png", "PnP median inlier reprojection (pixels)", (190, 80, 50))
+    if ablation is not None:
+        _plot([row["active_map_points"] for row in rows], output_dir / "active_map_points.png",
+              "Active map points", (40, 100, 180))
+        _plot([row["keyframes"] for row in rows], output_dir / "keyframes.png",
+              "Persistent keyframes", (130, 100, 40))
+        _plot([row["ba_initial_median_px"] for row in rows], output_dir / "ba_before_px.png",
+              "BA before median reprojection (pixels)", (180, 80, 80))
+        _plot([row["ba_final_median_px"] for row in rows], output_dir / "ba_after_px.png",
+              "BA after median reprojection (pixels)", (80, 150, 90))
     states = Counter(row["state"] for row in rows)
     accepted_pairs = [[a["anchor_frame"], a["candidate_frame"]] for a in tracker.attempts if a["initialization_status"] == "accepted"]
     pnp_inliers = [row["pnp_inliers"] for row in rows if row["pnp_inliers"] is not None]
@@ -276,6 +360,29 @@ def run_sequence(mode: str, output_dir: Path, config: dict[str, Any],
                "total_runtime_ms_median": float(np.median(timings)),
                "total_runtime_ms_p90": float(np.percentile(timings, 90)),
                "total_runtime_ms_sum": float(np.sum(timings))}
+    if ablation is not None:
+        span, longest, previous_segment = 0, 0, None
+        for row in rows:
+            if row["pose_valid"]:
+                span = span + 1 if previous_segment == row["segment_id"] else 1
+                previous_segment = row["segment_id"]
+                longest = max(longest, span)
+            else:
+                span, previous_segment = 0, None
+        summary.update(ablation=ablation, valid_poses=len(rows)-summary["no_pose_frames"],
+                       longest_valid_span=longest, keyframes=len(tracker.keyframe_events),
+                       new_map_points=sum(event["new_points"] for event in tracker.mapping_events),
+                       active_map_points_at_end=0 if tracker.active_map is None else sum(
+                           point.valid for point in tracker.active_map.points.values()),
+                       valid_map_points_all_segments=sum(point.valid for seg in tracker.segments
+                                                         for point in seg.points.values()),
+                       culled_map_points=sum(not point.valid for seg in tracker.segments for point in seg.points.values()),
+                       observation_count=sum(point.observation_count for seg in tracker.segments for point in seg.points.values()),
+                       ba_attempts=len(tracker.ba_events),
+                       ba_accepted=sum(event["applied"] for event in tracker.ba_events),
+                       ba_rejected=sum(not event["applied"] for event in tracker.ba_events),
+                       local_mapping_runtime_ms=distribution([row["local_mapping_ms"] for row in rows if row["local_mapping_ms"] is not None]),
+                       ba_runtime_ms=distribution([row["bundle_adjustment_ms"] for row in rows if row["bundle_adjustment_ms"] is not None]))
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, default=_json_default) + "\n", encoding="utf-8")
     return summary
 
@@ -289,10 +396,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=19)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/m3-synthetic"))
     parser.add_argument("--config", type=Path, default=Path("configs/default.json"))
+    parser.add_argument("--ablation", choices=("baseline", "growth", "descriptors", "full"))
+    parser.add_argument("--vary-visibility", action="store_true",
+                        help="Synthetic only: landmarks enter and leave the view")
     args = parser.parse_args()
     config = json.loads(args.config.read_text(encoding="utf-8"))
     print(json.dumps(run_sequence(args.mode, args.output_dir, config, args.kitti_sequence,
-                                  args.start, args.end, args.seed), indent=2))
+                                  args.start, args.end, args.seed, args.ablation,
+                                  args.vary_visibility), indent=2))
 
 
 if __name__ == "__main__":

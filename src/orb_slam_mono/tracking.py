@@ -15,6 +15,10 @@ from .features import OrbExtractor
 from .geometry import GeometryConfig, initialize_two_view, _valid_rotation
 from .map_state import Frame, SparseMap, TrackingState, map_from_initialization
 from .matching import DescriptorMatcher
+from .local_mapping import (MappingConfig, insert_keyframe, should_insert_keyframe,
+                            triangulate_new_points, cull_inconsistent_points,
+                            enforce_active_capacity)
+from .bundle_adjustment import BundleConfig, optimize_local_map
 
 
 @dataclass(frozen=True)
@@ -168,9 +172,15 @@ class MonocularTracker:
 
     def __init__(self, camera: CalibratedCamera, extractor: OrbExtractor,
                  matcher: DescriptorMatcher, geometry: GeometryConfig,
-                 config: TrackingConfig):
+                 config: TrackingConfig, mapping: MappingConfig | None = None,
+                 bundle: BundleConfig | None = None):
         self.camera, self.extractor, self.matcher = camera, extractor, matcher
         self.geometry, self.config = geometry, config
+        self.mapping = mapping or MappingConfig()
+        self.bundle = bundle or BundleConfig()
+        self.keyframe_events: list[dict[str, Any]] = []
+        self.mapping_events: list[dict[str, Any]] = []
+        self.ba_events: list[dict[str, Any]] = []
         self.state = TrackingState.INITIALIZING
         self.anchor: Frame | None = None
         self.anchor_image: np.ndarray | None = None
@@ -307,6 +317,13 @@ class MonocularTracker:
         started = perf_counter()
         sparse_map = map_from_initialization(self._next_segment, self.anchor, frame,
                                               matches.matches, geometry, self._next_point_id)
+        if self.mapping.enabled:
+            enforce_active_capacity(sparse_map, self.mapping, frame.frame_id)
+            insert_keyframe(sparse_map, sparse_map.frames[sparse_map.anchor_frame_id], self.mapping.window_size)
+            insert_keyframe(sparse_map, frame, self.mapping.window_size)
+            self.keyframe_events.extend({"segment_id": sparse_map.segment_id,
+                                         "frame_id": i, "reason": "initialization"}
+                                        for i in (sparse_map.anchor_frame_id, frame.frame_id))
         self._next_segment += 1
         self._next_point_id += len(sparse_map.points)
         self.active_map = sparse_map
@@ -371,8 +388,54 @@ class MonocularTracker:
             point_id = point_ids[match.queryIdx]
             sparse_map.add_observation(point_id, frame, match.trainIdx)
             frame.pnp_inlier_features.add(match.trainIdx)
-        sparse_map.validate()
+            if self.mapping.enabled and self.mapping.update_descriptors:
+                sparse_map.points[point_id].update_descriptor(
+                    frame.features.descriptors[match.trainIdx], self.mapping.descriptor_evidence_limit)
+        if not self.mapping.enabled:
+            sparse_map.validate()
         result.timing_ms["map_update"] = (perf_counter() - started) * 1000.0
         result.R_cw, result.t_cw = pnp.R_cw.copy(), pnp.t_cw.copy()
         result.diagnostics["map_points"] = len(sparse_map.points)
+        if should_insert_keyframe(sparse_map, frame, self.mapping):
+            previous = sparse_map.keyframes[max(sparse_map.keyframes)].frame
+            started = perf_counter()
+            insert_keyframe(sparse_map, frame, self.mapping.window_size)
+            self.keyframe_events.append({"segment_id": sparse_map.segment_id,
+                                         "frame_id": frame.frame_id, "reason": "coverage_or_baseline",
+                                         "active_window": list(sparse_map.active_keyframe_ids)})
+            result.diagnostics["keyframe_inserted"] = True
+            prior_ids = set(sparse_map.points)
+            prior_previous = previous.feature_to_point.copy()
+            prior_current = frame.feature_to_point.copy()
+            try:
+                mapping_report = triangulate_new_points(sparse_map, previous, frame, self.camera,
+                                                        self.matcher, self.mapping, self._next_point_id)
+            except (cv2.error, ValueError, FloatingPointError) as error:
+                for point_id in set(sparse_map.points) - prior_ids:
+                    del sparse_map.points[point_id]
+                previous.feature_to_point = prior_previous
+                frame.feature_to_point = prior_current
+                sparse_map.validate()
+                mapping_report = {"status": "rejected", "reason": type(error).__name__,
+                                  "new_points": 0, "runtime_ms": (perf_counter() - started) * 1000}
+            self._next_point_id += mapping_report["new_points"]
+            self.mapping_events.append({"segment_id": sparse_map.segment_id,
+                                        "frame_id": frame.frame_id, **mapping_report})
+            result.diagnostics["mapping"] = mapping_report
+            result.timing_ms["local_mapping"] = (perf_counter() - started) * 1000
+            if self.bundle.enabled and (len(sparse_map.keyframes) - 2) % self.bundle.every_n_keyframes == 0:
+                ba = optimize_local_map(sparse_map, self.camera, self.bundle)
+                self.ba_events.append({"segment_id": sparse_map.segment_id,
+                                       "frame_id": frame.frame_id, **ba})
+                result.diagnostics["bundle_adjustment"] = ba
+                result.timing_ms["bundle_adjustment"] = ba["runtime_ms"]
+                if ba["applied"]:
+                    result.R_cw, result.t_cw = frame.R_cw.copy(), frame.t_cw.copy()
+            culled = cull_inconsistent_points(sparse_map, self.camera, self.mapping,
+                                              frame.frame_id, set(frame.feature_to_point.values()))
+            result.diagnostics["culled_points"] = culled
+            result.diagnostics["map_points"] = len(sparse_map.points)
+            result.diagnostics["active_map_points"] = sum(p.valid for p in sparse_map.points.values())
+        if self.mapping.enabled:
+            result.diagnostics["keyframes"] = len(sparse_map.keyframes)
         self.last_successful_pose = result.as_dict()
