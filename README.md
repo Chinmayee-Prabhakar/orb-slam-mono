@@ -24,6 +24,7 @@ An independent, inspectable Python/OpenCV monocular visual SLAM project. M4 adds
 | `src/orb_slam_mono/bundle_adjustment.py` | Gauge-fixed sparse local reprojection optimization |
 | `src/orb_slam_mono/m4_ablation.py` | Four fixed M4 configurations and comparison CSV/JSON |
 | `src/orb_slam_mono/kitti_pose_evaluation.py` | Offline KITTI relative-pose scoring; never imported by the estimator |
+| `src/orb_slam_mono/trajectory_evaluation.py` | Offline frozen-trajectory Sim(3), ATE/RPE, coverage, failure, and ablation evaluation |
 | `configs/default.json` | Tunable ORB, matching, geometry, and visualization settings |
 | `scripts/extract_kitti_00_subset.py` | Selective ZIP extraction with byte/CRC verification |
 | `scripts/extract_kitti_00_poses.py` | Extract sequence-00 ground truth to ignored offline data |
@@ -31,6 +32,20 @@ An independent, inspectable Python/OpenCV monocular visual SLAM project. M4 adds
 | `scripts/audit_kitti_correspondences.py` | Original 20→25 correspondence and model-stability audit |
 | `scripts/score_m4_synthetic_offline.py` | Offline-only known-baseline scoring of saved M4 synthetic poses |
 | `tests/` | Standard-library unit tests, including optional local KITTI smoke test |
+
+## M5-A frozen trajectory evaluation
+
+The corrected M4 KITTI 00 frames 0–299 are evaluated offline without rerunning or retuning the estimator. The authority for online success is each variant's `per_frame.jsonl`; M5-A does not merge final keyframe poses or count initialization anchors as tracked frames. It validates original KITTI frame IDs and timestamp positions, applies separate proper positive-scale Sim(3) fits only to well-conditioned map segments, and exports ATE, orientation, exact-frame-gap relative errors, matched-frame ablations, coverage, failures, fingerprints, and plots. Full M4 has 145/300 online poses but only 58 poses in two alignment-eligible segments. Full M4 and descriptor-only online poses are identical because no corrected BA update was accepted. These short segment scores are not a full-trajectory accuracy claim.
+
+From the project root in PowerShell, use a new output directory if the example path already exists:
+
+```powershell
+$env:PYTHONPATH = (Resolve-Path .\src).Path
+python -m unittest discover -s tests -v
+python -m orb_slam_mono.trajectory_evaluation --sequence data/sequences/00 --ground-truth data/ground_truth/kitti_odometry/00.txt --results-root artifacts/m4-kitti-00-ba-validation-final --output-dir artifacts/m5a-frozen-evaluation --config configs/default.json --start 0 --end 299
+```
+
+See ignored `artifacts/m5a-frozen-evaluation/METRICS.md` for formulas, units, and eligibility, and `STATUS.md` for the measured results. M4.5 corrections and full M5-B restarted runs remain separate work.
 
 ## M4 keyframes, map growth, and local BA
 
