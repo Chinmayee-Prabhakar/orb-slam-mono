@@ -1,8 +1,22 @@
 # Status
 
+## M5-B — restarted-window evaluation complete
+
+The existing corrected full-M4 estimator was evaluated without an online algorithm or threshold change. Six fresh-process KITTI 00 runs cover A 0–299 twice, B 0–149 twice, and C 150–299 twice. All non-timing repeat outputs agree. A exactly preserves frozen corrected-M4 online pose/state decisions and saved map outputs; accepted M5-A offline scoring also agrees. The expanded regression suite passes **142/142**. The full method, numbers, figures, limitations, and review package are in `artifacts/m5b-final-evaluation/REPORT.md` and `FIGURE_GUIDE.md`.
+
+| Window | Online poses | Missing | Independent maps | Longest span | Own-eligible poses and in-sample ATE RMSE | Wall time | OS peak process working set |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A, 0–299 | 145/300 (48.33%) | 155 | 9 | 34 | 58 in two segments; 0.184586 m | 26.116 s | 218.46 MiB |
+| B, 0–149 | 76/150 (50.67%) | 74 | 5 | 34 | 34 in one segment; 0.225032 m | 14.109 s | 206.82 MiB |
+| C, 150–299 | 68/150 (45.33%) | 82 | 3 | 33 | 0; metric ATE unavailable | 13.619 s | 202.64 MiB |
+
+A and B are identical on the first 150 source IDs. Against C on IDs 150–299, A has 58 common valid, 11 full-only, 10 restart-only, and 71 both invalid; the independent C start changes initialization opportunities. A/C share a separately eligible **23-frame common subset** (178–200), with independently fit ATE RMSE 0.102543/0.236227 m. This does not make C's full segments own-eligible. A segment scales are 2.498513 and 8.195958 GT meters per estimated unit; separate maps cannot be joined in metric space. A's 88–121 prefix-fit/suffix-score RMSE is 0.614886 m on 17 suffix poses. All ten A BA updates still reject under held-out validation. Median frame computation is 16.923 ms but p95 is 202.858 ms and maximum 2315.133 ms, so real-time performance is not established. Process working set is whole-process memory, not isolated SLAM or GPU usage.
+
+**Decision:** proceed to M5-C only as an honest, short-segment visual demonstration. Disclose 155 full-window missing poses, nine separate maps, the small eligible accuracy population, in-sample alignment, no accepted BA updates, unavailable C metric ATE, restart sensitivity, and runtime tails. M5-C and any online correction require separate authorization. Figures, exact source ranges and inspection cues: `artifacts/m5b-final-evaluation/FIGURE_GUIDE.md`. Reproduce with `artifacts/m5b-final-evaluation/RUN_COMMANDS.txt`; the evidence package is `artifacts/m5b-final-evaluation/M5B-independent-review.zip`.
+
 ## Current milestone
 
-M4.5-D — fresh-map continuity and recovery assessment: **offline investigation complete; no production correction authorized**. Frozen corrected M4 remains 145/300 valid poses, nine segments, longest span 34, eight tracking losses, and 0/10 BA updates. An exact replay and bounded counterfactuals preserve online estimation. Two retained-map probes pass internal PnP gates but lack enough independent identity evidence for a safe recovery claim; two fixed gap-four recovery pairs reject under unchanged cheirality safeguards. Full M5-B remains unstarted.
+M5-B — restarted-window, trajectory, CPU-runtime, and process-memory assessment complete; M5-C is pending separate approval. The earlier M4.5-D findings below remain historical evidence.
 
 ## M4.5-D — continuity, recovery, and ORB-SLAM2 comparison
 

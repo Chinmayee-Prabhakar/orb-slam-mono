@@ -2,6 +2,8 @@
 
 An independent, inspectable Python/OpenCV monocular visual SLAM project. M4 adds keyframes, image-based map growth, bounded ORB descriptor evidence, and sparse local bundle adjustment to M3's sequential PnP tracker. Every map segment has its own arbitrary monocular origin and scale; invalid frame poses remain null.
 
+M5-B evaluated the unchanged corrected estimator on full KITTI 00 frames 0–299 and two independent 150-frame restarts. The full run has 145/300 accepted online poses in nine separate map segments; only 58 poses in two segments meet the offline geometric conditions for in-sample Sim(3) ATE (RMSE 0.184586 m). This is a short-segment result, not whole-sequence accuracy or sustained reliable tracking. See `artifacts/m5b-final-evaluation/REPORT.md` for coverage, restart effects, relative motion, runtime, process memory, figures, and the independent-review ZIP. M5-C visualization awaits separate authorization.
+
 ## Layout
 
 | Path | Purpose |
@@ -45,7 +47,7 @@ python -m unittest discover -s tests -v
 python -m orb_slam_mono.trajectory_evaluation --sequence data/sequences/00 --ground-truth data/ground_truth/kitti_odometry/00.txt --results-root artifacts/m4-kitti-00-ba-validation-final --output-dir artifacts/m5a-frozen-evaluation --config configs/default.json --start 0 --end 299
 ```
 
-See ignored `artifacts/m5a-frozen-evaluation/METRICS.md` for formulas, units, and eligibility, and `STATUS.md` for the measured results. M4.5 corrections and full M5-B restarted runs remain separate work.
+See ignored `artifacts/m5a-frozen-evaluation/METRICS.md` for formulas, units, and eligibility, and `STATUS.md` for the measured results. M4.5 diagnostics and the completed M5-B restarted runs are documented separately.
 
 ## M4 keyframes, map growth, and local BA
 

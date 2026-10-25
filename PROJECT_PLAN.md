@@ -4,6 +4,8 @@
 
 Build an original, inspectable monocular ORB feature-based visual localization and sparse mapping pipeline for GPS-denied navigation research. The eventual data flow is image → ORB features → descriptor/geometric filtering → monocular initialization → map points → map-based PnP tracking → keyframes/map maintenance → local bundle adjustment → trajectory/map output → offline evaluation and failure analysis. Loop closure is optional.
 
+M5-A frozen-baseline scoring and M5-B restarted-window evaluation are complete. M5-B preserves the corrected online estimator and measures full and independently restarted KITTI windows, eligible segment accuracy, exact-gap relative errors, runtime, and Windows process working set. Its go/no-go decision supports only a bounded M5-C visual demonstration with coverage and scale limits disclosed; any M5-C implementation needs separate authorization. See `artifacts/m5b-final-evaluation/REPORT.md` and `STATUS.md` for measured evidence.
+
 **Scientific invariants:** KITTI ground-truth poses never enter online estimation, map initialization, scale selection, or parameter tuning per frame. Monocular translation and reconstruction have unknown global scale, with scale drift expected over time. Ground truth may enter only an offline evaluation module; use Umeyama Sim(3) alignment there for ATE and explicitly report the alignment, raw scale behavior, and drift. A successful descriptor match is not a geometric inlier.
 
 Start development on a few hundred frames of a KITTI odometry training subsequence (suggested: sequence 00, frames 0–299), then try other short subsequences. Keep the first test data slice and parameter set fixed for comparisons; do not use the full sequences as the first target.
