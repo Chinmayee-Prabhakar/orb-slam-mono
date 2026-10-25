@@ -2,7 +2,9 @@
 
 An independent, inspectable Python/OpenCV monocular visual SLAM project. M4 adds keyframes, image-based map growth, bounded ORB descriptor evidence, and sparse local bundle adjustment to M3's sequential PnP tracker. Every map segment has its own arbitrary monocular origin and scale; invalid frame poses remain null.
 
-M5-B evaluated the unchanged corrected estimator on full KITTI 00 frames 0–299 and two independent 150-frame restarts. The full run has 145/300 accepted online poses in nine separate map segments; only 58 poses in two segments meet the offline geometric conditions for in-sample Sim(3) ATE (RMSE 0.184586 m). This is a short-segment result, not whole-sequence accuracy or sustained reliable tracking. See `artifacts/m5b-final-evaluation/REPORT.md` for coverage, restart effects, relative motion, runtime, process memory, figures, and the independent-review ZIP. M5-C visualization awaits separate authorization.
+M5-B evaluated the unchanged corrected estimator on full KITTI 00 frames 0–299 and two independent 150-frame restarts. The full run has 145/300 accepted online poses in nine separate map segments; only 58 poses in two segments meet the offline geometric conditions for in-sample Sim(3) ATE (RMSE 0.184586 m). This is a short-segment result, not whole-sequence accuracy or sustained reliable tracking. See `artifacts/m5b-final-evaluation/REPORT.md` for coverage, restart effects, relative motion, runtime, process memory, figures, and the independent-review ZIP.
+
+M5-C renders genuine image frames 88–122 and 252–282, accepted segment-local camera motion, final sparse maps, measured feature coordinates from an equivalence-checked diagnostic replay, and a separately labeled offline GT comparison for eligible segment 004. Its two MP4s, five PNG figures, source/score provenance, limitations, and review instructions are in `artifacts/m5c-visual-demonstration/`. Frame 122 and 282 have no estimated pose. The media plays at 5 fps from approximately 10 Hz source imagery and does not demonstrate real-time processing. Independent visual sign-off remains pending.
 
 ## Layout
 
@@ -27,6 +29,9 @@ M5-B evaluated the unchanged corrected estimator on full KITTI 00 frames 0–299
 | `src/orb_slam_mono/m4_ablation.py` | Four fixed M4 configurations and comparison CSV/JSON |
 | `src/orb_slam_mono/kitti_pose_evaluation.py` | Offline KITTI relative-pose scoring; never imported by the estimator |
 | `src/orb_slam_mono/trajectory_evaluation.py` | Offline frozen-trajectory Sim(3), ATE/RPE, coverage, failure, and ablation evaluation |
+| `src/orb_slam_mono/m5c_data.py` | Frozen-source checks, camera geometry, and equivalence-checked read-only feature capture |
+| `src/orb_slam_mono/m5c_render.py` | Real-image segment videos, separate local maps, and loss/restart storyboards |
+| `src/orb_slam_mono/m5c_offline_gt.py` | Separate offline-only eligible-segment GT comparison |
 | `configs/default.json` | Tunable ORB, matching, geometry, and visualization settings |
 | `scripts/extract_kitti_00_subset.py` | Selective ZIP extraction with byte/CRC verification |
 | `scripts/extract_kitti_00_poses.py` | Extract sequence-00 ground truth to ignored offline data |

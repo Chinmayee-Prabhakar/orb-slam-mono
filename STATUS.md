@@ -1,5 +1,13 @@
 # Status
 
+## M5-C — real-image visual demonstration generated; visual sign-off pending
+
+Two 1920×1080 MP4s show the genuine KITTI 00 grayscale images, measured ORB and retained-association image coordinates, accepted segment-local camera centers and frustums, and separately labeled **final** sparse maps. Segment 004 uses original frames 88–122: 34 accepted poses at 88–121, then no pose at 122. Segment 007 uses 252–282: 30 accepted poses at 252–281, then no pose at 282. The final maps contain 670 and 558 genuine estimated landmarks, respectively. The 35- and 31-frame MP4s decode to their final frames; OpenCV reports `FMP4` after a requested `mp4v` encode. Their 5 fps playback is slowed relative to approximately 10 Hz acquisition; it is not a tracker speed claim. Storyboards use nonconsecutive real frames and do not join maps.
+
+The saved Run A lacked feature pixel coordinates. Existing opt-in diagnostic capture was replayed read-only over all 300 images; its 300 online decisions, 2,700 compared per-frame fields, six event lists, final keyframes, and all nine final PLY files matched the frozen Run A (apart from timing measurements). Overlay circles are actual ORB pixels, retained 2D–3D candidate pairs, and raw RANSAC support; they do **not** certify landmark identity. The final PLY maps are shown throughout each clip as offline context because no historical point snapshots were saved. No pose is interpolated at a loss frame. A separate GT figure aligns only eligible segment 004 offline: 34-pose in-sample ATE RMSE **0.225032 m**; 17-pose prefix-fit/suffix-score RMSE **0.614886 m**. The 0.184586 m aggregate covers 58 poses from two independent segments and is not a segment-004 score.
+
+Outputs and exact inspection instructions: `artifacts/m5c-visual-demonstration/REPORT.md`, `FIGURE_GUIDE.md`, `VIDEO_GUIDE.md`, `REPRODUCE.txt`, and `M5C-independent-review.zip`. The full test suite passes **156/156**, including 14 focused M5-C checks. Accepted M5-B outputs and tracking/mapping code were not changed. Remaining limits: 155/300 missing full-window poses, nine independent map scales, no accepted BA update out of ten, no eligible segment-007 metric ATE, and substantial processing-time tails. Human inspection of the media and visual sign-off remain pending. No remote or push was used for M5-C.
+
 ## M5-B — restarted-window evaluation complete
 
 The existing corrected full-M4 estimator was evaluated without an online algorithm or threshold change. Six fresh-process KITTI 00 runs cover A 0–299 twice, B 0–149 twice, and C 150–299 twice. All non-timing repeat outputs agree. A exactly preserves frozen corrected-M4 online pose/state decisions and saved map outputs; accepted M5-A offline scoring also agrees. The expanded regression suite passes **142/142**. The full method, numbers, figures, limitations, and review package are in `artifacts/m5b-final-evaluation/REPORT.md` and `FIGURE_GUIDE.md`.
@@ -12,11 +20,11 @@ The existing corrected full-M4 estimator was evaluated without an online algorit
 
 A and B are identical on the first 150 source IDs. Against C on IDs 150–299, A has 58 common valid, 11 full-only, 10 restart-only, and 71 both invalid; the independent C start changes initialization opportunities. A/C share a separately eligible **23-frame common subset** (178–200), with independently fit ATE RMSE 0.102543/0.236227 m. This does not make C's full segments own-eligible. A segment scales are 2.498513 and 8.195958 GT meters per estimated unit; separate maps cannot be joined in metric space. A's 88–121 prefix-fit/suffix-score RMSE is 0.614886 m on 17 suffix poses. All ten A BA updates still reject under held-out validation. Median frame computation is 16.923 ms but p95 is 202.858 ms and maximum 2315.133 ms, so real-time performance is not established. Process working set is whole-process memory, not isolated SLAM or GPU usage.
 
-**Decision:** proceed to M5-C only as an honest, short-segment visual demonstration. Disclose 155 full-window missing poses, nine separate maps, the small eligible accuracy population, in-sample alignment, no accepted BA updates, unavailable C metric ATE, restart sensitivity, and runtime tails. M5-C and any online correction require separate authorization. Figures, exact source ranges and inspection cues: `artifacts/m5b-final-evaluation/FIGURE_GUIDE.md`. Reproduce with `artifacts/m5b-final-evaluation/RUN_COMMANDS.txt`; the evidence package is `artifacts/m5b-final-evaluation/M5B-independent-review.zip`.
+**Decision at M5-B:** proceed only to an honest, short-segment M5-C visual demonstration. Disclose 155 full-window missing poses, nine separate maps, the small eligible accuracy population, in-sample alignment, no accepted BA updates, unavailable C metric ATE, restart sensitivity, and runtime tails. The M5-C demonstration is now generated with human visual sign-off pending. M5-B figures, exact source ranges and inspection cues: `artifacts/m5b-final-evaluation/FIGURE_GUIDE.md`. Reproduce with `artifacts/m5b-final-evaluation/RUN_COMMANDS.txt`; its evidence package is `artifacts/m5b-final-evaluation/M5B-independent-review.zip`.
 
 ## Current milestone
 
-M5-B — restarted-window, trajectory, CPU-runtime, and process-memory assessment complete; M5-C is pending separate approval. The earlier M4.5-D findings below remain historical evidence.
+M5-C — generated visual media and review evidence, with human visual sign-off pending. The earlier M4.5-D findings below remain historical evidence.
 
 ## M4.5-D — continuity, recovery, and ORB-SLAM2 comparison
 
