@@ -45,12 +45,12 @@ class BundleConfig:
 
 def jacobian_sparsity(pose_columns: list[int | None], point_columns: list[int],
                       variable_count: int):
-    """Two pixel rows depend on one landmark and at most one variable camera."""
-    pattern = lil_matrix((2 * len(point_columns), variable_count), dtype=np.int8)
+    """Two pixel rows and one depth row share the landmark/variable-camera block."""
+    pattern = lil_matrix((3 * len(point_columns), variable_count), dtype=np.int8)
     for row, (pose_start, point_start) in enumerate(zip(pose_columns, point_columns)):
-        pattern[2 * row:2 * row + 2, point_start:point_start + 3] = 1
+        pattern[3 * row:3 * row + 3, point_start:point_start + 3] = 1
         if pose_start is not None:
-            pattern[2 * row:2 * row + 2, pose_start:pose_start + 6] = 1
+            pattern[3 * row:3 * row + 3, pose_start:pose_start + 6] = 1
     return pattern.tocsr()
 
 
@@ -62,6 +62,19 @@ def _projection(R: np.ndarray, t: np.ndarray, xyz: np.ndarray,
     uv = np.column_stack((camera.fx * points[:, 0] / safe_z + camera.cx,
                           camera.fy * points[:, 1] / safe_z + camera.cy))
     return uv, z
+
+
+def _observation_residuals(pixel_errors: np.ndarray, depths: np.ndarray) -> np.ndarray:
+    """Interleave signed (u, v) errors with an independent depth violation."""
+    if pixel_errors.shape != (len(depths), 2):
+        raise ValueError("Expected two pixel errors and one depth per observation")
+    if not np.isfinite(pixel_errors).all() or not np.isfinite(depths).all():
+        return np.full(3 * len(depths), 1e6)
+    # Matches the old uncanceled depth-only quadratic weight: 2*(100*d)^2.
+    with np.errstate(over="ignore", invalid="ignore"):
+        depth_penalty = 100 * np.sqrt(2) * np.maximum(0, 1e-4 - depths)
+    result = np.column_stack((pixel_errors, depth_penalty)).ravel()
+    return result if np.isfinite(result).all() else np.full(3 * len(depths), 1e6)
 
 
 def optimize_local_map(sparse_map: SparseMap, camera: CalibratedCamera,
@@ -185,11 +198,7 @@ def optimize_local_map(sparse_map: SparseMap, camera: CalibratedCamera,
 
     def residual(values):
         err, depth = errors_and_depth(values)
-        if not np.isfinite(err).all():
-            return np.full(2 * len(observations), 1e6)
-        # Negative depth is never an acceptable final map; large residual keeps
-        # the optimizer away from such candidate configurations.
-        return (err + np.maximum(0, 1e-4 - depth)[:, None] * 100).ravel()
+        return _observation_residuals(err, depth)
 
     initial_err, initial_depth = errors_and_depth(x0)
     if not np.isfinite(initial_err).all() or np.any(initial_depth <= 0):

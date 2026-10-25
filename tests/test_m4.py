@@ -10,7 +10,8 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
-from orb_slam_mono.bundle_adjustment import BundleConfig, _projection, jacobian_sparsity, optimize_local_map
+from orb_slam_mono.bundle_adjustment import (BundleConfig, _observation_residuals,
+                                              _projection, jacobian_sparsity, optimize_local_map)
 from orb_slam_mono.camera import CalibratedCamera
 from orb_slam_mono.datasets import KittiGraySequence
 from orb_slam_mono.features import FeatureSet, OrbExtractor
@@ -313,12 +314,16 @@ class BundleTests(unittest.TestCase):
 
     def test_sparse_jacobian_pattern_has_local_dependence(self):
         pattern = jacobian_sparsity([None, 0], [6, 9], 12).toarray()
-        self.assertEqual(pattern.shape, (4, 12))
+        self.assertEqual(pattern.shape, (6, 12))
         np.testing.assert_array_equal(pattern[0, :6], 0)
-        np.testing.assert_array_equal(pattern[2, :6], 1)
+        np.testing.assert_array_equal(pattern[2, :6], 0)
+        np.testing.assert_array_equal(pattern[3, :6], 1)
+        np.testing.assert_array_equal(pattern[5, :6], 1)
         np.testing.assert_array_equal(pattern[0, 6:9], 1)
-        np.testing.assert_array_equal(pattern[2, 9:12], 1)
-        self.assertEqual(int(pattern.sum()), 24)
+        np.testing.assert_array_equal(pattern[2, 6:9], 1)
+        np.testing.assert_array_equal(pattern[3, 9:12], 1)
+        np.testing.assert_array_equal(pattern[5, 9:12], 1)
+        self.assertEqual(int(pattern.sum()), 36)
 
     def test_sparse_pattern_contains_finite_difference_sensitivities(self):
         # One fixed-pose/point observation and one variable-pose/other-point observation.
@@ -327,9 +332,10 @@ class BundleTests(unittest.TestCase):
                        np.array([0.4, 0.1, 8., -0.3, 0.2, 9.])]
         def residual(x):
             R = cv2.Rodrigues(x[:3])[0]
-            first = _projection(np.eye(3), np.zeros(3), x[6:9].reshape(1, 3), CAMERA)[0][0]
-            second = _projection(R, x[3:6], x[9:12].reshape(1, 3), CAMERA)[0][0]
-            return np.r_[first, second]
+            first, z1 = _projection(np.eye(3), np.zeros(3), x[6:9].reshape(1, 3), CAMERA)
+            second, z2 = _projection(R, x[3:6], x[9:12].reshape(1, 3), CAMERA)
+            return _observation_residuals(np.vstack((first[0], second[0])),
+                                          np.r_[z1, z2])
         eps = 1e-6
         fd = np.column_stack([(residual(values + eps * np.eye(12)[i]) -
                                residual(values - eps * np.eye(12)[i])) / (2 * eps)
@@ -337,6 +343,135 @@ class BundleTests(unittest.TestCase):
         self.assertTrue(np.isfinite(fd).all())
         self.assertLess(np.max(np.abs(fd[~pattern])), 1e-7)
         self.assertGreater(np.max(np.abs(fd[pattern])), 1.0)
+
+    def test_old_depth_cancellation_is_impossible_with_separate_residual(self):
+        camera = CalibratedCamera(300, 300, 100., 100., 50., 50.)
+        pixel, depth = _projection(np.eye(3), np.zeros(3),
+                                   np.array([[0., 0., -1.]]), camera)
+        old_penalty = 100 * (1e-4 - depth[0])
+        measured = pixel[0] + old_penalty
+        error = pixel - measured
+        np.testing.assert_allclose(error[0] + old_penalty, [0., 0.], atol=1e-12)
+        corrected = _observation_residuals(error, depth)
+        self.assertEqual(corrected.shape, (3,))
+        np.testing.assert_allclose(corrected[:2], -old_penalty)
+        self.assertGreater(corrected[2], 0)
+        self.assertGreater(np.linalg.norm(corrected), old_penalty)
+
+    def test_depth_penalty_ordering_sign_and_finite_near_zero(self):
+        errors = np.array([[1., -2.], [3., -4.], [-5., 6.]])
+        depths = np.array([8., 1e-8, -0.3])
+        residual = _observation_residuals(errors, depths).reshape(3, 3)
+        np.testing.assert_array_equal(residual[:, :2], errors)
+        self.assertEqual(residual[0, 2], 0.)
+        np.testing.assert_allclose(residual[1:, 2],
+                                   100 * np.sqrt(2) * np.maximum(0, 1e-4-depths[1:]))
+        self.assertTrue(np.isfinite(residual).all())
+        self.assertTrue((residual[:, 2] >= 0).all())
+        self.assertTrue((_observation_residuals(np.full((1, 2), np.nan),
+                                                      np.array([1.])) == 1e6).all())
+        self.assertTrue((_observation_residuals(np.zeros((1, 2)),
+                                                      np.array([-1e308])) == 1e6).all())
+
+    def test_depth_jacobian_finite_difference_fixed_and_variable_camera(self):
+        # Negative depths activate both depth rows; nontrivial rotation makes
+        # the variable-camera rotation and point columns numerically visible.
+        values = np.array([0.12, -0.17, 0.06, 0.3, -0.2, -2.,
+                           0.4, 0.2, -1., 0.3, -0.2, 1.])
+        pattern = jacobian_sparsity([None, 0], [6, 9], 12).toarray().astype(bool)
+        def objective(x):
+            rotation = cv2.Rodrigues(x[:3])[0]
+            uv0, z0 = _projection(np.eye(3), np.zeros(3), x[6:9].reshape(1, 3), CAMERA)
+            uv1, z1 = _projection(rotation, x[3:6], x[9:12].reshape(1, 3), CAMERA)
+            errors = np.vstack((uv0[0] - [470., 300.], uv1[0] - [500., 320.]))
+            return _observation_residuals(errors, np.r_[z0, z1])
+        eps = 1e-6
+        eye = np.eye(len(values))
+        finite = np.column_stack([(objective(values + eps * eye[j]) -
+                                   objective(values - eps * eye[j])) / (2 * eps)
+                                  for j in range(len(values))])
+        self.assertEqual(finite.shape, (6, 12))
+        self.assertTrue(np.isfinite(finite).all())
+        self.assertLess(np.max(np.abs(finite[~pattern])), 1e-6)
+        weight = 100 * np.sqrt(2)
+        self.assertAlmostEqual(finite[2, 8], -weight, places=4)
+        self.assertAlmostEqual(finite[5, 5], -weight, places=4)
+        self.assertGreater(abs(finite[5, 0]), 1e-2)
+        self.assertGreater(abs(finite[5, 9]), 1e-2)
+        self.assertTrue((finite[2, :6] == 0).all())
+
+    def test_optimizer_receives_three_rows_per_observation_and_fixed_gauge(self):
+        mapped = self._noisy_map()
+        anchors = [(mapped.frames[i].R_cw.copy(), mapped.frames[i].t_cw.copy()) for i in (0, 1)]
+        captured = {}
+        def inspect(objective, x0, **kwargs):
+            captured["rows"] = len(objective(x0))
+            captured["shape"] = kwargs["jac_sparsity"].shape
+            captured["loss"] = kwargs["loss"]
+            captured["budget"] = kwargs["max_nfev"]
+            return SimpleNamespace(x=x0.copy(), success=False, status=0,
+                                   message="budget exhausted", nfev=12)
+        with patch("orb_slam_mono.bundle_adjustment.least_squares", side_effect=inspect):
+            report = optimize_local_map(mapped, CAMERA, BundleConfig())
+        self.assertFalse(report["applied"])
+        self.assertEqual(captured["rows"], 3 * report["observations"])
+        self.assertEqual(captured["shape"], (captured["rows"], 6 + 3 * 30))
+        self.assertEqual(captured["loss"], "soft_l1")
+        self.assertEqual(captured["budget"], 12)
+        for i, (R, t) in zip((0, 1), anchors):
+            np.testing.assert_array_equal(mapped.frames[i].R_cw, R)
+            np.testing.assert_array_equal(mapped.frames[i].t_cw, t)
+
+    def test_behind_camera_candidate_rejects_without_any_map_mutation(self):
+        mapped = self._noisy_map()
+        old_poses = {i: (frame.R_cw.copy(), frame.t_cw.copy()) for i, frame in mapped.frames.items()}
+        old_points = {i: (point.xyz_world.copy(), point.descriptor.copy(),
+                          dict(point.observations)) for i, point in mapped.points.items()}
+        def invalid(_objective, x0, **_kwargs):
+            candidate = x0.copy()
+            candidate[8] = -8.  # First optimized point goes behind every camera.
+            return SimpleNamespace(x=candidate, success=False, status=0,
+                                   message="budget exhausted", nfev=12)
+        with patch("orb_slam_mono.bundle_adjustment.least_squares", side_effect=invalid):
+            report = optimize_local_map(mapped, CAMERA, BundleConfig())
+        self.assertFalse(report["applied"])
+        self.assertEqual(report["reason"], "optimization_quality_gate")
+        for i, frame in mapped.frames.items():
+            np.testing.assert_array_equal(frame.R_cw, old_poses[i][0])
+            np.testing.assert_array_equal(frame.t_cw, old_poses[i][1])
+        for i, point in mapped.points.items():
+            np.testing.assert_array_equal(point.xyz_world, old_points[i][0])
+            np.testing.assert_array_equal(point.descriptor, old_points[i][1])
+            self.assertEqual(point.observations, old_points[i][2])
+        mapped.validate()
+
+    def test_separate_segment_is_untouched_by_local_ba(self):
+        mapped = self._noisy_map()
+        other = self._noisy_map()
+        other.segment_id = 99
+        for keyframe in other.keyframes.values():
+            keyframe.segment_id = 99
+        other.validate()
+        other_points = {i: point.xyz_world.copy() for i, point in other.points.items()}
+        other_poses = {i: (frame.R_cw.copy(), frame.t_cw.copy()) for i, frame in other.frames.items()}
+        optimize_local_map(mapped, CAMERA, BundleConfig(max_nfev=18))
+        for i, point in other.points.items():
+            np.testing.assert_array_equal(point.xyz_world, other_points[i])
+        for i, frame in other.frames.items():
+            np.testing.assert_array_equal(frame.R_cw, other_poses[i][0])
+            np.testing.assert_array_equal(frame.t_cw, other_poses[i][1])
+        other.validate()
+
+    def test_disabled_ba_never_calls_optimizer_during_tracking(self):
+        sequence = generate_sequence(count=12)
+        tracker = MonocularTracker(sequence.camera, OrbExtractor(), DescriptorMatcher(),
+                                   GeometryConfig(), TrackingConfig(),
+                                   MappingConfig(enabled=True), BundleConfig(enabled=False))
+        with patch("orb_slam_mono.tracking.optimize_local_map",
+                   side_effect=AssertionError("disabled BA must not run")):
+            results = [tracker.process(sample) for sample in sequence.samples]
+        self.assertTrue(any(result.R_cw is not None for result in results))
+        self.assertEqual(tracker.ba_events, [])
 
     def test_underconstrained_invalid_depth_and_failed_optimizer_rollback(self):
         mapped, _ = _fixture(4)

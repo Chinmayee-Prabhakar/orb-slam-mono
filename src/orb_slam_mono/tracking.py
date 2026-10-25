@@ -89,7 +89,8 @@ class PnPResult:
 
 
 def solve_map_pnp(xyz_world: np.ndarray, pixels: np.ndarray,
-                  camera: CalibratedCamera, config: TrackingConfig) -> PnPResult:
+                  camera: CalibratedCamera, config: TrackingConfig,
+                  diagnostic_capture: dict[str, Any] | None = None) -> PnPResult:
     """Return a pose only after numerical, inlier, depth and reprojection gates."""
     result = PnPResult(diagnostics={"pnp_ransac_attempted": False})
     try:
@@ -115,6 +116,13 @@ def solve_map_pnp(xyz_world: np.ndarray, pixels: np.ndarray,
     except cv2.error:
         result.reason = "pnp_solver_failed"
         return result
+    if diagnostic_capture is not None:
+        diagnostic_capture.update(
+            ransac_success=bool(success),
+            raw_rvec=None if not success or rvec is None else np.asarray(rvec, dtype=np.float64).reshape(-1).copy(),
+            raw_tvec=None if not success or tvec is None else np.asarray(tvec, dtype=np.float64).reshape(-1).copy(),
+            raw_inlier_indices=None if not success or inliers is None else np.asarray(inliers, dtype=int).reshape(-1).copy(),
+            pose_stage="unrefined RANSAC candidate; never an accepted pose by itself")
     if not success or inliers is None or rvec is None or tvec is None:
         result.reason = "pnp_solver_failed"
         return result
@@ -173,7 +181,8 @@ class MonocularTracker:
     def __init__(self, camera: CalibratedCamera, extractor: OrbExtractor,
                  matcher: DescriptorMatcher, geometry: GeometryConfig,
                  config: TrackingConfig, mapping: MappingConfig | None = None,
-                 bundle: BundleConfig | None = None):
+                 bundle: BundleConfig | None = None,
+                 *, capture_pnp_diagnostics: bool = False):
         self.camera, self.extractor, self.matcher = camera, extractor, matcher
         self.geometry, self.config = geometry, config
         self.mapping = mapping or MappingConfig()
@@ -198,6 +207,8 @@ class MonocularTracker:
         self._next_point_id = 0
         self._last_frame_id: int | None = None
         self.visual_event: dict[str, Any] | None = None
+        self.capture_pnp_diagnostics = capture_pnp_diagnostics
+        self.diagnostic_event: dict[str, Any] | None = None
 
     def _transition(self, next_state: TrackingState) -> None:
         if next_state not in self.LEGAL_TRANSITIONS[self.state]:
@@ -210,6 +221,7 @@ class MonocularTracker:
         self._last_frame_id = sample.index
         start = perf_counter()
         self.visual_event = None
+        self.diagnostic_event = None
         if self.terminal_lost:
             return self._terminal_result(sample.index, start, first_timeout=False)
         if self.recovery_start is not None and self.state != TrackingState.TRACKING:
@@ -348,7 +360,10 @@ class MonocularTracker:
         started = perf_counter()
         point_ids = sorted(point_id for point_id, point in sparse_map.points.items() if point.valid)
         descriptors = np.stack([sparse_map.points[point_id].descriptor for point_id in point_ids]) if point_ids else None
-        matches = self.matcher.match(descriptors, frame.features.descriptors)
+        match_capture: dict[str, Any] | None = {} if self.capture_pnp_diagnostics else None
+        matches = (self.matcher.match(descriptors, frame.features.descriptors)
+                   if match_capture is None else
+                   self.matcher.match(descriptors, frame.features.descriptors, diagnostic=match_capture))
         result.timing_ms["association"] = (perf_counter() - started) * 1000.0
         result.diagnostics.update(candidate_map_associations=matches.knn_pairs,
                                   ratio_passed_map_associations=matches.ratio_passed,
@@ -356,8 +371,37 @@ class MonocularTracker:
                                   map_points=len(sparse_map.points))
         xyz = np.array([sparse_map.points[point_ids[m.queryIdx]].xyz_world for m in matches.matches], dtype=np.float64).reshape(-1, 3)
         uv = np.array([frame.features.keypoints[m.trainIdx].pt for m in matches.matches], dtype=np.float64).reshape(-1, 2)
+        pnp_capture: dict[str, Any] | None = {} if self.capture_pnp_diagnostics else None
+        if self.capture_pnp_diagnostics:
+            self.diagnostic_event = {
+                "frame_id": frame.frame_id, "segment_id": sparse_map.segment_id,
+                "keypoints_xy": np.asarray([keypoint.pt for keypoint in frame.features.keypoints], dtype=np.float64),
+                "candidate_point_ids": list(point_ids), "matcher": match_capture,
+                "active_landmarks": [
+                    {"point_id": point_id, "xyz_world": sparse_map.points[point_id].xyz_world.copy(),
+                     "observation_count": sparse_map.points[point_id].observation_count,
+                     "first_observed_frame": min(sparse_map.points[point_id].observations),
+                     "last_observed_frame": max(sparse_map.points[point_id].observations),
+                     "age_since_observation_frames": frame.frame_id - max(sparse_map.points[point_id].observations),
+                     "descriptor_evidence_count": len(sparse_map.points[point_id].descriptor_evidence)}
+                    for point_id in point_ids],
+                "correspondences": [
+                    {"point_id": point_ids[match.queryIdx], "image_feature_index": int(match.trainIdx),
+                     "pixel_xy": uv[row].copy(), "xyz_world": xyz[row].copy(),
+                     "hamming": float(match.distance)}
+                    for row, match in enumerate(matches.matches)],
+                "previous_accepted_pose": None if self.last_successful_pose is None else {
+                    key: self.last_successful_pose[key] for key in
+                    ("frame_id", "segment_id", "T_cw_R", "T_cw_t")},
+                "pnp_candidate": pnp_capture,
+            }
         started = perf_counter()
-        pnp = solve_map_pnp(xyz, uv, self.camera, self.config)
+        pnp = (solve_map_pnp(xyz, uv, self.camera, self.config)
+               if pnp_capture is None else
+               solve_map_pnp(xyz, uv, self.camera, self.config, diagnostic_capture=pnp_capture))
+        if self.diagnostic_event is not None:
+            self.diagnostic_event["pnp_accepted"] = pnp.accepted
+            self.diagnostic_event["pnp_rejection_reason"] = pnp.reason
         self.visual_event = {"kind": "pnp", "image": image, "pixels": uv,
                              "inlier_indices": pnp.inlier_indices.copy(),
                              "status": "accepted" if pnp.accepted else "rejected"}
