@@ -139,11 +139,19 @@ class AssociationAuditTests(unittest.TestCase):
             self.assertNotIn("ground_truth", content)
 
     def test_audit_output_is_scoped_and_existing_evidence_cannot_be_overwritten(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        with self.assertRaises(ValueError):
-            run_audit(root, root / "artifacts" / "other-study")
-        with self.assertRaises(FileExistsError):
-            run_audit(root, root / "artifacts" / "m45b1-association-audit")
+        # A unit test must not depend on ignored local milestone evidence.
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with self.assertRaises(ValueError):
+                run_audit(root, root / "artifacts" / "other-study")
+            output = root / "artifacts" / "m45b1-association-audit"
+            output.mkdir(parents=True)
+            marker = output / "audit_summary.json"
+            marker.write_text("{}\n", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                run_audit(root, output)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "{}\n")
 
 
 if __name__ == "__main__":

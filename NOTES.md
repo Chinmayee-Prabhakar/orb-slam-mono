@@ -1,5 +1,19 @@
 # Design notes
 
+## Release follow-up safeguards
+
+The report correction changes only presentation of the already implemented separate BA depth residual: `[e_u, e_v, 100 * sqrt(2) * max(0, 0.0001 - z)]`. The regenerated PDF has three visually inspected pages and no creation/modification date metadata. MIT applies to the independently written source under root `LICENSE`; it does not license KITTI images, derived media, or third-party components.
+
+The approved local history cleanup is complete. Publishable `main` retains ten linear commits; the audited nonfunctional `REFERENCES.md` section was removed from historical snapshots, and the first commit's author and committer month was corrected. Other commit metadata and non-reference trees match the originals. The reachable-history reference scan passed, and an external private recovery backup remains available. No experiment outputs or estimator files were edited for this review. The recorded post-transition suite passed **161/161 tests**; release files remain uncommitted, with no remote, push, or publication.
+
+## Public-release reproduction boundary
+
+The release helper imports the existing offline M5-B scoring and restart functions; it neither imports the online tracker nor changes Sim(3), coverage, or eligibility mathematics. It requires six newly saved A/B/C runs, official sequence-00 images/calibration/timestamps, and offline KITTI poses. It checks non-timing repeatability before writing a new evaluation directory, refuses an existing output, and records that earlier private milestone comparisons were not performed. The original stricter historical-audit command remains available when those ignored artifacts are supplied.
+
+The independent clean-copy check used only committed project files plus the documented official KITTI archives. The old association-audit test failed without ignored `preflight_sha256.json`; its replacement constructs a temporary completed-output marker and verifies no overwrite. The clean copy then passed all 161 tests and reproduced the three final windows, figures, two real-image videos, and offline segment-004 GT comparison. The release PDF formatting correction is complete: it was regenerated from the public Markdown source, rendered page by page, and stripped of creation/modification metadata. MIT is selected for independently written source; KITTI and other third-party materials retain their own terms. Publication still depends on human review and dataset-license compliance for image-derived media.
+
+The current public prose contains no private user path, development date, generated-at timestamp, or unnecessary secondary-repository reference. The publishable history passed the targeted reference scan. Local refs and import references show no shared Git ancestry or code dependency, but do not prove the absence of copied code. Ignored presentation outputs and handoff material remain local, while the report PDF is eligible for the proposed commit.
+
 ## M5-C visual provenance and interpretation
 
 - The frozen full-window M5-B Run A remains the authority for all online states and poses. `m5c_data.py` validates original PNG filenames 000000–000299, each clip's inclusive source-frame IDs, every accepted/lost `T_cw`, final pose-export agreement, 670/558-point segment PLYs, and the 145-pose/nine-map/34-span/0-of-10-BA summary. No threshold, matcher, initializer, PnP, mapping, BA, or output from the accepted estimator was edited.
